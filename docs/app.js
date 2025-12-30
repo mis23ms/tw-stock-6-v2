@@ -1,11 +1,9 @@
-// 固定 4 檔讀 data.json；自選 2 檔走前端即時抓 + localStorage
 const DATA_URL = "./data.json";
-const EXTRA_LS_KEY = "tw-stock-06.extraTickers.v1"; // 改這個 key 就會清空舊資料
-
-// 台股習慣：紅=上漲/買超、綠=下跌/賣超
+const EXTRA_LS_KEY = "tw-stock-06.extraTickers.v2"; // 換 key，避免舊資料怪狀
 const FUTURES_SUPPORTED = new Set(["2330", "2317", "3231", "2382"]);
 
-/* -------------------- utils -------------------- */
+let renderSeq = 0; // ✅ 用來避免 render 競態造成重複卡片
+
 function escapeHtml(s) {
   return String(s ?? "")
     .replaceAll("&", "&amp;")
@@ -28,6 +26,11 @@ function fmtInt(n) {
   return Math.trunc(num).toLocaleString("en-US");
 }
 
+function parseSignedPercent(s) {
+  const n = toNumber(s);
+  return n === null ? null : n;
+}
+
 function trendInfo(change, changePct) {
   const c = change ?? 0;
   const p = changePct ?? 0;
@@ -41,27 +44,186 @@ function trendInfo(change, changePct) {
 function foreignTag(netLots) {
   if (netLots === null || netLots === undefined) return null;
   const absN = Math.abs(netLots);
-  if (absN < 800) return null; // <800 不標
+  if (absN < 800) return null;
   if (netLots >= 3000) return { text: "強買超", cls: "pos", lv: "lv3" };
   if (netLots >= 800) return { text: "買超", cls: "pos", lv: "lv2" };
   if (netLots <= -3000) return { text: "強賣超", cls: "neg", lv: "lv3" };
   return { text: "賣超", cls: "neg", lv: "lv2" };
 }
 
-function parseSignedPercent(s) {
-  // "+0.65%" -> 0.65 ; "-1.2%" -> -1.2
-  const n = toNumber(s);
-  return n === null ? null : n;
-}
-
-/* -------------------- data load -------------------- */
 async function loadData() {
   const r = await fetch(DATA_URL, { cache: "no-store" });
   if (!r.ok) throw new Error("load data.json failed");
   return r.json();
 }
 
-/* -------------------- cards -------------------- */
+function getExtraTickers() {
+  try {
+    const raw = localStorage.getItem(EXTRA_LS_KEY);
+    const arr = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(arr)) return [];
+    return arr.map((x) => String(x || "").trim()).filter(Boolean).slice(0, 2);
+  } catch {
+    return [];
+  }
+}
+function setExtraTickers(list) {
+  localStorage.setItem(EXTRA_LS_KEY, JSON.stringify(list.slice(0, 2)));
+}
+function isValidTicker(t) {
+  return /^[0-9]{4,6}$/.test(String(t || "").trim());
+}
+function uniq2(list) {
+  const out = [];
+  for (const x of list) {
+    if (!x) continue;
+    if (!out.includes(x)) out.push(x);
+    if (out.length >= 2) break;
+  }
+  return out;
+}
+
+/* -------- extra fetch (前端即時) -------- */
+async function fetchTwseCodeName(ticker) {
+  try {
+    const url = `https://www.twse.com.tw/rwd/zh/api/codeQuery?query=${encodeURIComponent(ticker)}`;
+    const r = await fetch(url, { cache: "no-store" });
+    if (!r.ok) return null;
+    const j = await r.json();
+    const arr = j.suggestions || [];
+    if (!arr.length) return null;
+    const first = String(arr[0] || "");
+    const parts = first.split("\t");
+    return parts.length >= 2 ? parts[1].trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+function rocToAd(roc) {
+  const m = String(roc).match(/^(\d{2,3})\/(\d{1,2})\/(\d{1,2})$/);
+  if (!m) return null;
+  const y = Number(m[1]) + 1911;
+  const mm = String(m[2]).padStart(2, "0");
+  const dd = String(m[3]).padStart(2, "0");
+  return `${y}-${mm}-${dd}`;
+}
+
+async function fetchPriceChangePct(ticker, latestTradingDay) {
+  try {
+    const ymd = latestTradingDay.replaceAll("-", "");
+    const url = `https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date=${ymd}&stockNo=${ticker}`;
+    const r = await fetch(url, { cache: "no-store" });
+    if (!r.ok) throw new Error("TWSE STOCK_DAY failed");
+    const j = await r.json();
+    const rows = j.data || [];
+    if (!rows.length) throw new Error("no rows");
+
+    const parsed = [];
+    for (const row of rows) {
+      const ad = rocToAd(row[0]);
+      const close = toNumber(row[6]);
+      const chg = toNumber(row[7]);
+      if (ad && close !== null && chg !== null) parsed.push({ ad, close, chg });
+    }
+    parsed.sort((a, b) => (a.ad > b.ad ? 1 : -1));
+    let idx = parsed.findIndex((x) => x.ad === latestTradingDay);
+    if (idx < 0) idx = parsed.length - 1;
+    const cur = parsed[idx];
+
+    const prevClose = idx - 1 >= 0 ? parsed[idx - 1].close : null;
+    const pct = prevClose ? ((cur.close - prevClose) / prevClose) * 100 : null;
+
+    const closeStr = String(cur.close).replace(/\.0+$/, "");
+    const chgStr = (cur.chg > 0 ? "+" : "") + String(cur.chg).replace(/\.0+$/, "");
+    const pctStr = pct === null ? null : (pct > 0 ? "+" : "") + pct.toFixed(2) + "%";
+
+    return { close: closeStr, change: chgStr, change_pct: pctStr };
+  } catch {
+    return { close: null, change: null, change_pct: null };
+  }
+}
+
+async function fetchForeignLots(ticker, ymd) {
+  try {
+    const url = `https://www.twse.com.tw/rwd/zh/fund/T86?response=json&selectType=ALLBUT0999&date=${ymd.replaceAll("-", "")}`;
+    const r = await fetch(url, { cache: "no-store" });
+    if (!r.ok) return null;
+    const j = await r.json();
+    const data = j.data || [];
+    for (const row of data) {
+      if (String(row[0]).trim() === String(ticker)) {
+        const netShares = toNumber(row[4]);
+        if (netShares === null) return null;
+        const lots = Math.round(netShares / 1000);
+        return lots.toLocaleString("en-US");
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchExtraStock(ticker, data) {
+  const name = (await fetchTwseCodeName(ticker)) || ticker;
+  const price = await fetchPriceChangePct(ticker, data.latest_trading_day);
+  const d0 = await fetchForeignLots(ticker, data.latest_trading_day);
+  const d1 = await fetchForeignLots(ticker, data.prev_trading_day);
+  return {
+    ticker,
+    name,
+    price,
+    foreign_net_shares: { D0: d0, D1: d1 },
+    news: { conference: [], revenue: [], material: [], capacity: [], export: [] },
+  };
+}
+
+/* -------- UI: extra inputs -------- */
+function renderExtraUI(onApply, onClear) {
+  const el = document.querySelector("#extra");
+  if (!el) return;
+
+  const stored = getExtraTickers();
+  const v1 = stored[0] || "";
+  const v2 = stored[1] || "";
+
+  el.innerHTML = `
+    <div class="kv" style="gap:14px; align-items:center">
+      <div>
+        <div class="muted" style="font-size:12px; margin-bottom:6px">加股票 1（4 碼）</div>
+        <input id="ex1" value="${escapeHtml(v1)}" inputmode="numeric" maxlength="6"
+               style="width:120px;padding:8px 10px;border-radius:10px;border:1px solid #2a3c55;background:#0d1420;color:#e8eef6" />
+      </div>
+      <div>
+        <div class="muted" style="font-size:12px; margin-bottom:6px">加股票 2（4 碼）</div>
+        <input id="ex2" value="${escapeHtml(v2)}" inputmode="numeric" maxlength="6"
+               style="width:120px;padding:8px 10px;border-radius:10px;border:1px solid #2a3c55;background:#0d1420;color:#e8eef6" />
+      </div>
+
+      <div style="display:flex; gap:10px; align-items:flex-end; padding-bottom:2px">
+        <button id="apply" class="tab" style="padding:8px 12px">套用</button>
+        <button id="clear" class="tab" style="padding:8px 12px">清空</button>
+      </div>
+    </div>
+    <div class="muted" style="margin-top:10px">
+      自選股存在 localStorage；不影響固定 4 檔 GitHub Actions 更新。
+    </div>
+  `;
+
+  const btnApply = el.querySelector("#apply");
+  const btnClear = el.querySelector("#clear");
+
+  btnApply.addEventListener("click", () => {
+    const t1 = (el.querySelector("#ex1").value || "").trim();
+    const t2 = (el.querySelector("#ex2").value || "").trim();
+    onApply([t1, t2], btnApply);
+  });
+
+  btnClear.addEventListener("click", () => onClear(btnClear));
+}
+
+/* -------- cards -------- */
 function renderStockCard(s, data, { isExtra = false } = {}) {
   const card = document.createElement("div");
   card.className = "card";
@@ -75,8 +237,8 @@ function renderStockCard(s, data, { isExtra = false } = {}) {
   const changePctVal = parseSignedPercent(price.change_pct);
   const trend = trendInfo(changeVal, changePctVal);
 
-  const foreignLots = toNumber(f.D0); // 這裡已是「張」
-  const foreignTagObj = foreignTag(foreignLots);
+  const foreignLots = toNumber(f.D0);
+  const tag = foreignTag(foreignLots);
 
   const futAll = data?.taifex_large_trader || {};
   const futDate = futAll.date ? String(futAll.date) : "";
@@ -117,20 +279,11 @@ function renderStockCard(s, data, { isExtra = false } = {}) {
             <small>✅ 期貨未平倉（大額交易人）</small>
             ${futDate ? `<span class="pill pill-mini">資料日 ${escapeHtml(futDate)}</span>` : ""}
           </div>
-          <div class="muted">
-            目前抓不到資料${futError ? `：${escapeHtml(futError)}` : "（TAIFEX 可能維護或版面變動）"}
-          </div>
+          <div class="muted">目前抓不到資料${futError ? `：${escapeHtml(futError)}` : ""}</div>
         </div>
       `;
     }
-  } else {
-    futHtml = `
-      <div class="fut">
-        <div class="fut-head"><small>✅ 期貨未平倉（大額交易人）</small></div>
-        <div class="muted">此欄位目前只支援：2330/2317/3231/2382</div>
-      </div>
-    `;
-  }
+  } // ✅ 不支援的就不顯示期貨區塊（避免自選股一直看到那段）
 
   card.innerHTML = `
     <div class="row">
@@ -143,7 +296,6 @@ function renderStockCard(s, data, { isExtra = false } = {}) {
 
         <div style="margin-top:6px">
           <small>收盤</small> <strong>${escapeHtml(price.close ?? "-")}</strong>
-
           <span class="metric" style="margin-left:10px">
             <small>漲跌</small>
             <span class="badge ${trend.cls} ${trend.lv}">${trend.icon} ${escapeHtml(price.change ?? "-")}</span>
@@ -160,11 +312,7 @@ function renderStockCard(s, data, { isExtra = false } = {}) {
             <span class="pill">
               ${escapeHtml(data.prev_trading_day)}: ${escapeHtml(f.D1 ?? "-")}
             </span>
-            ${
-              foreignTagObj
-                ? `<span class="badge ${foreignTagObj.cls} ${foreignTagObj.lv}">💰 ${escapeHtml(foreignTagObj.text)}</span>`
-                : ""
-            }
+            ${tag ? `<span class="badge ${tag.cls} ${tag.lv}">💰 ${escapeHtml(tag.text)}</span>` : ""}
           </div>
         </div>
 
@@ -192,7 +340,7 @@ function renderStockCard(s, data, { isExtra = false } = {}) {
       box.innerHTML = `<div class="muted">這類今天沒有抓到新新聞（或資料源暫時無回應）。</div>`;
       return;
     }
-    const html = list
+    box.innerHTML = list
       .map(
         (it) =>
           `<div class="item">• <a href="${escapeHtml(it.url)}" target="_blank" rel="noreferrer">${escapeHtml(
@@ -200,7 +348,6 @@ function renderStockCard(s, data, { isExtra = false } = {}) {
           )}</a><div class="muted">${escapeHtml(it.time || "")}</div></div>`
       )
       .join("");
-    box.innerHTML = html;
   }
 
   renderList("conference");
@@ -215,7 +362,7 @@ function renderStockCard(s, data, { isExtra = false } = {}) {
   return card;
 }
 
-/* -------------------- ZGB / ZGK render -------------------- */
+/* -------- ZGB / ZGK tables from data.json -------- */
 function renderZGB(data) {
   const el = document.querySelector("#zgb");
   if (!el) return;
@@ -299,10 +446,7 @@ function renderZGK(data) {
     <div class="kv">${datePill}</div>
     <table>
       <thead>
-        <tr>
-          <th colspan="5">買超</th>
-          <th colspan="5">賣超</th>
-        </tr>
+        <tr><th colspan="5">買超</th><th colspan="5">賣超</th></tr>
         <tr>
           <th>#</th><th>股票</th><th>超張數</th><th>收盤</th><th>漲跌</th>
           <th>#</th><th>股票</th><th>超張數</th><th>收盤</th><th>漲跌</th>
@@ -313,179 +457,51 @@ function renderZGK(data) {
   `;
 }
 
-/* -------------------- extra UI / fetch -------------------- */
-function getExtraTickers() {
-  try {
-    const raw = localStorage.getItem(EXTRA_LS_KEY);
-    const arr = raw ? JSON.parse(raw) : [];
-    if (!Array.isArray(arr)) return [];
-    return arr.map((x) => String(x || "").trim()).filter(Boolean).slice(0, 2);
-  } catch {
-    return [];
-  }
-}
+/* -------- main render -------- */
+async function renderStocks(data, extraTickers, btnToLock) {
+  const mySeq = ++renderSeq; // ✅ 每次 render 都有自己的序號
+  const root = document.querySelector("#stocks");
+  if (!root) return;
+  root.innerHTML = "";
 
-function setExtraTickers(list) {
-  localStorage.setItem(EXTRA_LS_KEY, JSON.stringify(list.slice(0, 2)));
-}
-
-function renderExtraUI(onApply, onClear) {
-  const el = document.querySelector("#extra");
-  if (!el) return;
-
-  const stored = getExtraTickers();
-  const v1 = stored[0] || "";
-  const v2 = stored[1] || "";
-
-  el.innerHTML = `
-    <div class="kv" style="gap:14px; align-items:center">
-      <div>
-        <div class="muted" style="font-size:12px; margin-bottom:6px">加股票 1（4 碼）</div>
-        <input id="ex1" value="${escapeHtml(v1)}" inputmode="numeric" maxlength="6"
-               style="width:120px;padding:8px 10px;border-radius:10px;border:1px solid #2a3c55;background:#0d1420;color:#e8eef6" />
-      </div>
-      <div>
-        <div class="muted" style="font-size:12px; margin-bottom:6px">加股票 2（4 碼）</div>
-        <input id="ex2" value="${escapeHtml(v2)}" inputmode="numeric" maxlength="6"
-               style="width:120px;padding:8px 10px;border-radius:10px;border:1px solid #2a3c55;background:#0d1420;color:#e8eef6" />
-      </div>
-
-      <div style="display:flex; gap:10px; align-items:flex-end; padding-bottom:2px">
-        <button id="apply" class="tab" style="padding:8px 12px">套用</button>
-        <button id="clear" class="tab" style="padding:8px 12px">清空</button>
-      </div>
-    </div>
-    <div class="muted" style="margin-top:10px">
-      這兩支是你「隔天關掉瀏覽器也還會留著」的自選股（存在 localStorage；不影響固定 4 檔的 GitHub Actions 更新）。
-    </div>
-  `;
-
-  el.querySelector("#apply").addEventListener("click", () => {
-    const t1 = (el.querySelector("#ex1").value || "").trim();
-    const t2 = (el.querySelector("#ex2").value || "").trim();
-    onApply([t1, t2]);
-  });
-
-  el.querySelector("#clear").addEventListener("click", () => {
-    el.querySelector("#ex1").value = "";
-    el.querySelector("#ex2").value = "";
-    onClear();
-  });
-}
-
-function isValidTicker(t) {
-  return /^[0-9]{4,6}$/.test(String(t || "").trim());
-}
-
-async function fetchTwseCodeName(ticker) {
-  // 盡量拿到名稱（拿不到就用 ticker）
-  try {
-    const url = `https://www.twse.com.tw/rwd/zh/api/codeQuery?query=${encodeURIComponent(ticker)}`;
-    const r = await fetch(url, { cache: "no-store" });
-    if (!r.ok) return null;
-    const j = await r.json();
-    const arr = j.suggestions || [];
-    if (!arr.length) return null;
-    // suggestions 格式通常是 ["2330\t台積電", ...]
-    const first = String(arr[0] || "");
-    const parts = first.split("\t");
-    if (parts.length >= 2) return parts[1].trim();
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-function rocToAd(roc) {
-  // "114/12/30" => "2025-12-30"
-  const m = String(roc).match(/^(\d{2,3})\/(\d{1,2})\/(\d{1,2})$/);
-  if (!m) return null;
-  const y = Number(m[1]) + 1911;
-  const mm = String(m[2]).padStart(2, "0");
-  const dd = String(m[3]).padStart(2, "0");
-  return `${y}-${mm}-${dd}`;
-}
-
-async function fetchPriceChangePct(ticker, latestTradingDay) {
-  // 用 TWSE STOCK_DAY（同後端做法）
-  try {
-    const ymd = latestTradingDay.replaceAll("-", "");
-    const url = `https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date=${ymd}&stockNo=${ticker}`;
-    const r = await fetch(url, { cache: "no-store" });
-    if (!r.ok) throw new Error("TWSE STOCK_DAY failed");
-    const j = await r.json();
-    const rows = j.data || [];
-    if (!rows.length) throw new Error("no rows");
-
-    const parsed = [];
-    for (const row of rows) {
-      const ad = rocToAd(row[0]);
-      const close = toNumber(row[6]);
-      const chg = toNumber(row[7]);
-      if (ad && close !== null && chg !== null) parsed.push({ ad, close, chg });
-    }
-    parsed.sort((a, b) => (a.ad > b.ad ? 1 : -1));
-    let idx = parsed.findIndex((x) => x.ad === latestTradingDay);
-    if (idx < 0) idx = parsed.length - 1;
-    const cur = parsed[idx];
-
-    let prevClose = null;
-    if (idx - 1 >= 0) prevClose = parsed[idx - 1].close;
-    // 如果同月只有一天，這裡就先不補上個月（前端自選股就簡化）
-    const pct = prevClose ? ((cur.close - prevClose) / prevClose) * 100 : null;
-
-    const closeStr = Number.isInteger(cur.close) ? String(cur.close) : String(cur.close).replace(/\.0+$/, "");
-    const chgStr = (cur.chg > 0 ? "+" : "") + String(cur.chg).replace(/\.0+$/, "");
-    const pctStr = pct === null ? null : (pct > 0 ? "+" : "") + pct.toFixed(2) + "%";
-
-    return { close: closeStr, change: chgStr, change_pct: pctStr };
-  } catch {
-    return { close: null, change: null, change_pct: null };
-  }
-}
-
-async function fetchForeignLots(ticker, ymd) {
-  // ymd: "YYYY-MM-DD"
-  try {
-    const url = `https://www.twse.com.tw/rwd/zh/fund/T86?response=json&selectType=ALLBUT0999&date=${ymd.replaceAll("-", "")}`;
-    const r = await fetch(url, { cache: "no-store" });
-    if (!r.ok) return null;
-    const j = await r.json();
-    const data = j.data || [];
-    for (const row of data) {
-      if (String(row[0]).trim() === String(ticker)) {
-        const netShares = toNumber(row[4]);
-        if (netShares === null) return null;
-        const lots = Math.round(netShares / 1000); // 跟後端一樣（足夠）
-        return lots.toLocaleString("en-US");
-      }
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-async function fetchExtraStock(ticker, data) {
-  const name = (await fetchTwseCodeName(ticker)) || ticker;
-  const price = await fetchPriceChangePct(ticker, data.latest_trading_day);
-  const d0 = await fetchForeignLots(ticker, data.latest_trading_day);
-  const d1 = await fetchForeignLots(ticker, data.prev_trading_day);
-
-  return {
-    ticker,
-    name,
-    price,
-    foreign_net_shares: { D0: d0, D1: d1 },
-    news: { conference: [], revenue: [], material: [], capacity: [], export: [] },
+  const disableBtn = (b, v) => {
+    if (!b) return;
+    b.disabled = v;
+    b.style.opacity = v ? "0.6" : "1";
+    b.style.pointerEvents = v ? "none" : "auto";
   };
+  disableBtn(btnToLock, true);
+
+  // 固定 4 檔
+  const fixedStocks = Object.values(data.stocks || {});
+  for (const s of fixedStocks) {
+    if (mySeq !== renderSeq) return; // ✅ 被新 render 取代就停止
+    root.appendChild(renderStockCard(s, data, { isExtra: false }));
+  }
+
+  // 自選（去重 + 最多2）
+  const extras = uniq2(extraTickers.map((x) => x.trim()).filter(Boolean).filter(isValidTicker));
+  for (const t of extras) {
+    if (mySeq !== renderSeq) return;
+    try {
+      const ex = await fetchExtraStock(t, data);
+      if (mySeq !== renderSeq) return;
+      root.appendChild(renderStockCard(ex, data, { isExtra: true }));
+    } catch (e) {
+      if (mySeq !== renderSeq) return;
+      const err = document.createElement("div");
+      err.className = "card";
+      err.innerHTML = `<div class="bad">自選 ${escapeHtml(t)} 抓取失敗：${escapeHtml(e)}</div>`;
+      root.appendChild(err);
+    }
+  }
+
+  disableBtn(btnToLock, false);
 }
 
-/* -------------------- main render -------------------- */
 async function renderAll() {
   const data = await loadData();
 
-  // meta
   const meta = document.querySelector("#meta");
   if (meta) {
     meta.textContent = `更新時間：${data.generated_at || "-"} ｜ 最新交易日：${data.latest_trading_day || "-"} ｜ 前一交易日：${
@@ -493,54 +509,25 @@ async function renderAll() {
     }`;
   }
 
-  // extra UI
   renderExtraUI(
-    async (tickers) => {
-      const cleaned = tickers.map((t) => t.trim()).filter(Boolean).slice(0, 2);
-      const finalList = cleaned.filter(isValidTicker);
-      setExtraTickers(finalList);
-      await renderStocks(data, finalList);
+    async (tickers, btn) => {
+      const cleaned = uniq2(tickers.map((t) => t.trim()).filter(Boolean).filter(isValidTicker));
+      setExtraTickers(cleaned);
+      await renderStocks(data, cleaned, btn);
     },
-    async () => {
+    async (btn) => {
       setExtraTickers([]);
-      await renderStocks(data, []);
+      await renderStocks(data, [], btn);
     }
   );
 
-  // stocks (fixed 4 + extra 2)
-  const extra = getExtraTickers().filter(isValidTicker);
+  const extra = uniq2(getExtraTickers().filter(isValidTicker));
   await renderStocks(data, extra);
 
-  // zgb / zgk
   renderZGB(data);
   renderZGK(data);
 }
 
-async function renderStocks(data, extraTickers) {
-  const root = document.querySelector("#stocks");
-  if (!root) return;
-  root.innerHTML = "";
-
-  const fixedStocks = Object.values(data.stocks || {});
-  for (const s of fixedStocks) {
-    root.appendChild(renderStockCard(s, data, { isExtra: false }));
-  }
-
-  // extra
-  for (const t of extraTickers) {
-    try {
-      const ex = await fetchExtraStock(t, data);
-      root.appendChild(renderStockCard(ex, data, { isExtra: true }));
-    } catch (e) {
-      const err = document.createElement("div");
-      err.className = "card";
-      err.innerHTML = `<div class="bad">自選 ${escapeHtml(t)} 抓取失敗：${escapeHtml(e)}</div>`;
-      root.appendChild(err);
-    }
-  }
-}
-
-// 入口
 renderAll().catch((e) => {
   const meta = document.querySelector("#meta");
   if (meta) meta.textContent = `載入失敗：${String(e)}`;
