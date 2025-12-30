@@ -17,3 +17,92 @@ th{color:#cfe0f3;font-weight:600}
 a{color:#7aa7ff;text-decoration:none}a:hover{text-decoration:underline}
 small{color:#9fb1c6}
 .bad{color:#ffb4b4}
+
+/* ==================== v2：視覺強化（紅=買超/上漲；綠=賣超/下跌） ==================== */
+/* 卡片光暈 + 漸層質感（不影響原本排版） */
+.card{
+  background: linear-gradient(180deg, rgba(255,255,255,0.045), rgba(255,255,255,0.02));
+}
+.card:hover{
+  box-shadow: 0 0 0 1px rgba(255,255,255,0.14), 0 14px 40px rgba(0,0,0,0.35), 0 0 32px rgba(120,220,255,0.10);
+  transform: translateY(-2px);
+}
+
+/* 標籤（漲跌 / 外資） */
+.badge{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  padding:4px 8px;
+  border-radius:999px;
+  border:1px solid rgba(255,255,255,0.12);
+  font-size:12px;
+  line-height:1;
+  white-space:nowrap;
+}
+
+.badge.pos{ /* 紅：上漲/買超 */
+  color: rgba(255,120,120,1);
+  border-color: rgba(255,120,120,0.30);
+  background: rgba(255,80,80,0.10);
+}
+.badge.neg{ /* 綠：下跌/賣超 */
+  color: rgba(130,255,190,1);
+  border-color: rgba(130,255,190,0.30);
+  background: rgba(80,255,160,0.10);
+}
+.badge.flat{
+  color: rgba(210,210,210,1);
+  border-color: rgba(255,255,255,0.20);
+  background: rgba(255,255,255,0.06);
+}
+
+/* 越深越強 */
+.badge.lv1{ filter:saturate(0.9); opacity:0.85; }
+.badge.lv2{ filter:saturate(1.0); opacity:1; }
+.badge.lv3{ filter:saturate(1.1); opacity:1; background: rgba(255,80,80,0.18); }
+.badge.neg.lv3{ background: rgba(80,255,160,0.18); }
+
+/* 外資 pill：只強調今天那顆 */
+.pill-pos{
+  border-color: rgba(255,120,120,0.35) !important;
+  color: rgba(255,170,170,1) !important;
+}
+.pill-neg{
+  border-color: rgba(130,255,190,0.35) !important;
+  color: rgba(180,255,220,1) !important;
+}
+
+/* 期貨區塊 */
+.fut{
+  margin-top:10px;
+  padding:10px;
+  border-radius:14px;
+  border:1px solid rgba(255,255,255,0.10);
+  background: rgba(255,255,255,0.02);
+}
+.fut-head{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+}
+.fut-grid{
+  margin-top:8px;
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+}
+.fut-row{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  flex-wrap:wrap;
+}
+.pill-mini{
+  font-size:11px;
+  padding:2px 6px;
+}
+.mono{
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
