@@ -220,30 +220,52 @@ function escapeHtml(s) {
     .replaceAll("'", "&#039;");
 }
 
-// 入口：沿用你原本的 init / render 邏輯
+// 入口：改成吃 index.html 既有的 #meta/#stocks/#zgb/#zgk（不再用 #root）
+function renderRawBlock(obj, maxLines = 200) {
+  if (!obj) return `<div class="muted">無資料</div>`;
+  if (obj.error) return `<div class="bad">${escapeHtml(obj.error)}</div>`;
+  const raw = String(obj.raw || "").trim();
+  if (!raw) return `<div class="muted">無資料</div>`;
+  const lines = raw.split("\n").slice(0, maxLines).join("\n");
+  return `<pre style="white-space:pre-wrap;margin:0">${escapeHtml(lines)}</pre>
+          <div class="muted" style="margin-top:8px">（只顯示前 ${maxLines} 行，避免頁面太重）</div>`;
+}
+
 (async function init() {
   try {
     const data = await loadData();
 
-    const root = document.querySelector("#root");
-    if (!root) return;
+    // meta
+    const metaEl = document.getElementById("meta");
+    if (metaEl) {
+      metaEl.textContent = `更新：${data.generated_at}｜交易日：${data.latest_trading_day}（前一日：${data.prev_trading_day}）`;
+    }
 
-    // 你原本的固定 4 檔渲染：沿用
-    const stocks = Object.values(data.stocks || {});
-    const grid = document.createElement("div");
-    grid.className = "grid";
+    // 固定 4 檔 → #stocks
+    const stocksEl = document.getElementById("stocks");
+    if (stocksEl) {
+      stocksEl.innerHTML = "";
+      const stocks = Object.values(data.stocks || {});
+      stocks.forEach((s) => {
+        stocksEl.appendChild(renderStockCard(s, data));
+      });
+    }
 
-    stocks.forEach((s) => {
-      grid.appendChild(renderStockCard(s, data));
-    });
+    // ZGB / ZGK → 先用 raw 顯示（你後端目前就是塞 raw）
+    const zgbEl = document.getElementById("zgb");
+    if (zgbEl) zgbEl.innerHTML = renderRawBlock(data.fubon_zgb);
 
-    root.appendChild(grid);
+    const zgkEl = document.getElementById("zgk");
+    if (zgkEl) zgkEl.innerHTML = renderRawBlock(data.fubon_zgk_d);
 
-    // 自選 2 檔 UI：用你原本版本（不在這裡亂改）
+    // 自選 2 檔（你現在 app.js 這段是空的，先別動它也不會影響固定 4 檔）
     // renderExtraUI(data);
 
   } catch (e) {
-    const root = document.querySelector("#root");
-    if (root) root.innerHTML = `<div class="card"><strong>載入失敗</strong><div class="muted">${escapeHtml(e)}</div></div>`;
+    const metaEl = document.getElementById("meta");
+    if (metaEl) metaEl.textContent = "載入失敗";
+    const stocksEl = document.getElementById("stocks") || document.body;
+    stocksEl.innerHTML = `<div class="card"><strong>載入失敗</strong><div class="muted">${escapeHtml(e)}</div></div>`;
   }
 })();
+
