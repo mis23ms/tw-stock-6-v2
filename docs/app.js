@@ -1,590 +1,439 @@
-// docs/app.js
+/* 盤後一頁式戰報 - 前端
+ * - 固定 4 檔：讀 data.json（由 GitHub Actions 產）
+ * - 自選 2 檔：localStorage；前端即時抓 TWSE（同樣算 close/change/pct + 外資(張)）
+ * - 顏色標註：只針對「漲跌」「外資」
+ */
+
 const DATA_URL = "./data.json";
 
-// 固定：只支援這四檔的 TAIFEX 股票期貨
-const FUTURES_SUPPORTED = new Set(["2330", "2317", "3231", "2382"]);
+const FIXED = ["2330", "2317", "3231", "2382"];
+const LS_KEY_1 = "twstock_custom_1";
+const LS_KEY_2 = "twstock_custom_2";
 
-// 自選 2 檔：存在 localStorage（不影響固定 4 檔）
-const LS_KEY = "tw-stock-extra-2";
+/** 你原本固定 4 檔的股期才顯示 TAIFEX */
+const TAIFEX_SUPPORTED = new Set(FIXED);
 
-// -------------------- utils --------------------
-function escapeHtml(s) {
-  return String(s ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
+function $(sel) { return document.querySelector(sel); }
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined) n.textContent = text;
+  return n;
 }
 
-function toNumber(v) {
-  if (v === null || v === undefined) return null;
-  const s = String(v).replace(/,/g, "").trim();
-  const m = s.match(/-?\d+(?:\.\d+)?/);
-  return m ? Number(m[0]) : null;
+function fmtNum(n, digits = 2) {
+  if (n === null || n === undefined || Number.isNaN(n)) return "—";
+  const x = Number(n);
+  if (!Number.isFinite(x)) return "—";
+  return x.toLocaleString("en-US", { maximumFractionDigits: digits, minimumFractionDigits: digits });
 }
-
 function fmtInt(n) {
-  const num = typeof n === "number" ? n : toNumber(n);
-  if (num === null || Number.isNaN(num)) return "-";
-  return Math.trunc(num).toLocaleString("en-US");
+  if (n === null || n === undefined || Number.isNaN(n)) return "—";
+  const x = Number(n);
+  if (!Number.isFinite(x)) return "—";
+  return Math.trunc(x).toLocaleString("en-US");
+}
+function fmtSigned(n, digits = 2) {
+  if (n === null || n === undefined || Number.isNaN(n)) return "—";
+  const x = Number(n);
+  if (!Number.isFinite(x)) return "—";
+  const s = x > 0 ? "+" : "";
+  return s + fmtNum(x, digits);
 }
 
-function fmtFloat(n, digits = 2) {
-  const num = typeof n === "number" ? n : toNumber(n);
-  if (num === null || Number.isNaN(num)) return "-";
-  return num.toFixed(digits);
+function badgeForChange(chg) {
+  const x = Number(chg);
+  if (!Number.isFinite(x) || x === 0) return { cls: "badge flat", label: "—" };
+  // 漲跌：越深越強（用變動幅度粗分）
+  const abs = Math.abs(x);
+  const lv = abs >= 5 ? "lv3" : abs >= 1 ? "lv2" : "lv1";
+  return { cls: `badge ${x > 0 ? "pos" : "neg"} ${lv}`, label: fmtSigned(x, 2) };
 }
 
-// 台股習慣：紅=上漲/買超、綠=下跌/賣超
-function trendInfo(change, changePct) {
-  const c = change ?? 0;
-  const p = changePct ?? 0;
-  const absP = Math.abs(p || 0);
-  const lv = absP >= 3 ? "lv3" : absP >= 1 ? "lv2" : "lv1";
-  if (c > 0) return { cls: "pos", lv, icon: "📈" };
-  if (c < 0) return { cls: "neg", lv, icon: "📉" };
-  return { cls: "flat", lv: "lv1", icon: "➖" };
+function badgeForForeignLots(netLots) {
+  const x = Number(netLots);
+  if (!Number.isFinite(x) || Math.abs(x) < 800) return null; // <800 不標
+  const lv = Math.abs(x) >= 3000 ? "lv3" : "lv2"; // 800~2999 / >=3000
+  const cls = `badge ${x > 0 ? "pos" : "neg"} ${lv}`;
+  const label = `${x > 0 ? "買超" : "賣超"} ${fmtNum(Math.abs(x), 0)} 張`;
+  return { cls, label };
 }
 
-function foreignTag(net) {
-  if (net === null || net === undefined) return null;
-  const absN = Math.abs(net);
-  if (absN < 800) return null; // <800 不標
-  if (net >= 3000) return { text: "強買超", cls: "pos", lv: "lv3" };
-  if (net >= 800) return { text: "買超", cls: "pos", lv: "lv2" };
-  if (net <= -3000) return { text: "強賣超", cls: "neg", lv: "lv3" };
-  return { text: "賣超", cls: "neg", lv: "lv2" };
+function stockTitle(name, ticker) {
+  if (name && name.trim()) return name.trim();
+  return "—";
 }
 
-// -------------------- load data.json --------------------
-async function loadData() {
-  const r = await fetch(DATA_URL, { cache: "no-store" });
-  if (!r.ok) throw new Error("load data.json failed");
-  return r.json();
-}
+/* ---------------------------
+ * 自選：前端抓 TWSE
+ * ---------------------------
+ * close/change/pct：STOCK_DAY（用 data.json 的 latest_trading_day_ymd 當月份）
+ * foreign：T86（同一個交易日）
+ */
 
-// -------------------- extra tickers (localStorage) --------------------
-function readExtraTickers() {
-  try {
-    const raw = localStorage.getItem(LS_KEY);
-    if (!raw) return ["", ""];
-    const arr = JSON.parse(raw);
-    if (!Array.isArray(arr)) return ["", ""];
-    return [String(arr[0] ?? ""), String(arr[1] ?? "")];
-  } catch {
-    return ["", ""];
-  }
-}
-
-function writeExtraTickers(a, b) {
-  localStorage.setItem(LS_KEY, JSON.stringify([a, b]));
-}
-
-function normTicker(s) {
-  const t = String(s ?? "").trim();
-  if (!t) return "";
-  // 允許 4~6 位（ETF/REIT 也有 4 位；有些市場可能 5~6）
-  if (!/^\d{4,6}$/.test(t)) return "";
-  return t;
-}
-
-// -------------------- client-side fetch for extra tickers --------------------
-// 用 TWSE STOCK_DAY（月資料）抓最近兩筆收盤 -> 算 change / pct
-async function fetchTwsePrice(ticker) {
-  const now = new Date();
-  // 用當月 01（TWSE 要 YYYYMMDD）
-  const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, "0");
-  const date = `${y}${m}01`;
-  const url = `https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&stockNo=${ticker}&date=${date}`;
+async function fetchJson(url) {
   const r = await fetch(url, { cache: "no-store" });
-  if (!r.ok) throw new Error("TWSE 取價失敗");
-  const j = await r.json();
-  const rows = j?.data || [];
-  if (!rows.length) throw new Error("TWSE 無資料");
-  // rows: [日期(民國), 成交股數, 成交金額, 開, 高, 低, 收, 漲跌價差, 成交筆數]
-  const last = rows[rows.length - 1];
-  const prev = rows.length >= 2 ? rows[rows.length - 2] : null;
-  const close = toNumber(last?.[6]);
-  const prevClose = prev ? toNumber(prev?.[6]) : null;
-  const change = prevClose === null || close === null ? null : close - prevClose;
-  const changePct = prevClose ? (change / prevClose) * 100 : null;
-  return { close, change, change_pct: changePct };
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return await r.json();
 }
 
-// 外資：前端只做「最新日」即可（自選只要求顯示，不要搞到很重）
-async function fetchTwseForeignD0(ticker) {
-  const url = `https://www.twse.com.tw/rwd/zh/fund/T86?response=json&selectType=ALLBUT0999&date=&_=1`;
-  const r = await fetch(url, { cache: "no-store" });
-  if (!r.ok) return { D0: null };
-  const j = await r.json();
-  const data = j?.data || [];
+function ymdToRoc(ymd) {
+  const y = parseInt(ymd.slice(0, 4), 10) - 1911;
+  const m = ymd.slice(4, 6);
+  const d = ymd.slice(6, 8);
+  return `${y}/${m}/${d}`;
+}
+
+async function fetchTwseStockDay(ymd, ticker) {
+  const url = `https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date=${ymd}&stockNo=${ticker}`;
+  const j = await fetchJson(url);
+  if ((j.stat || "").toUpperCase() !== "OK") throw new Error(`STOCK_DAY stat=${j.stat}`);
+
+  const roc = ymdToRoc(ymd);
+  const data = j.data || [];
+  let row = data.find(r => (r && String(r[0]).trim() === roc));
+  if (!row && data.length) row = data[data.length - 1];
+  if (!row) throw new Error("STOCK_DAY empty data");
+
+  const close = Number(String(row[6]).replace(/,/g, ""));
+  const change = Number(String(row[7]).replace(/,/g, ""));
+  const prevClose = close - change;
+  const pct = prevClose ? (change / prevClose * 100.0) : 0;
+
+  // title 常見： "114年12月2330 台積電各日成交資訊"
+  const title = j.title || "";
+  let name = "";
+  const m = title.match(new RegExp(`${ticker}\\s*([^\\s]+)`));
+  if (m && m[1]) name = m[1].trim();
+
+  return { ticker, name, close, change, pct };
+}
+
+async function fetchTwseT86Map(ymd) {
+  const url = `https://www.twse.com.tw/fund/T86?response=json&date=${ymd}&selectType=ALL`;
+  const j = await fetchJson(url);
+  if ((j.stat || "").toUpperCase() !== "OK") throw new Error(`T86 stat=${j.stat}`);
+
+  const fields = j.fields || [];
+  const data = j.data || [];
+
+  const idx = (needleList) => {
+    for (const nd of needleList) {
+      const i = fields.findIndex(f => String(f).includes(nd));
+      if (i >= 0) return i;
+    }
+    return -1;
+  };
+
+  const iCode = idx(["證券代號"]);
+  const iBuy  = idx(["外陸資買進股數", "外資買進股數"]);
+  const iSell = idx(["外陸資賣出股數", "外資賣出股數"]);
+  const iNet  = idx(["外陸資買賣超股數", "外資買賣超股數"]);
+
+  if (iCode < 0 || iBuy < 0 || iSell < 0) throw new Error("T86 fields not found");
+
+  const mp = new Map();
   for (const row of data) {
-    if (String(row?.[0] ?? "").trim() === String(ticker)) {
-      return { D0: row?.[4] ?? null };
-    }
+    const code = String(row[iCode]).trim();
+    const buy = Number(String(row[iBuy]).replace(/,/g, "")) || 0;
+    const sell = Number(String(row[iSell]).replace(/,/g, "")) || 0;
+    const net = (iNet >= 0 ? (Number(String(row[iNet]).replace(/,/g, "")) || 0) : (buy - sell));
+    mp.set(code, {
+      buy_shares: buy,
+      sell_shares: sell,
+      net_shares: net,
+      net_lots: net / 1000.0,
+    });
   }
-  return { D0: null };
+  return mp;
 }
 
-// -------------------- render: stock card --------------------
-function renderStockCard(s, data, { isExtra = false } = {}) {
-  const card = document.createElement("div");
-  card.className = "card";
+/* ---------------------------
+ * UI render
+ * --------------------------- */
 
-  const price = s.price || {};
-  const f = s.foreign_net_shares || {};
-  const ticker = String(s.ticker || "");
-  const name = String(s.name || "");
+function renderHeader(data) {
+  $("#updatedAt").textContent = data?.generated_at || "—";
+  $("#latestDay").textContent = data?.latest_trading_day || "—";
+  $("#prevDay").textContent = data?.prev_trading_day || "—";
+}
 
-  const changeVal = toNumber(price.change);
-  const changePctVal = toNumber(price.change_pct);
-  const trend = trendInfo(changeVal, changePctVal);
+function renderCustomInputs() {
+  const v1 = localStorage.getItem(LS_KEY_1) || "";
+  const v2 = localStorage.getItem(LS_KEY_2) || "";
+  $("#custom1").value = v1;
+  $("#custom2").value = v2;
 
-  const foreignVal = toNumber(f.D0);
-  const foreignTagObj = foreignTag(foreignVal);
+  $("#applyCustom").onclick = () => {
+    localStorage.setItem(LS_KEY_1, ($("#custom1").value || "").trim());
+    localStorage.setItem(LS_KEY_2, ($("#custom2").value || "").trim());
+    location.reload();
+  };
+  $("#clearCustom").onclick = () => {
+    localStorage.removeItem(LS_KEY_1);
+    localStorage.removeItem(LS_KEY_2);
+    location.reload();
+  };
+}
 
-  // TAIFEX
-  const futAll = data?.taifex_large_trader || {};
-  const futDate = futAll.date ? String(futAll.date) : "";
-  const futError = futAll.error ? String(futAll.error) : "";
-  const fut = futAll.by_ticker ? futAll.by_ticker[ticker] : null;
+function stockCardFromData(stock, taifexInfo) {
+  const card = el("div", "card");
+  const top = el("div", "row");
+  const left = el("div");
 
-  let futHtml = "";
-  if (FUTURES_SUPPORTED.has(ticker) && !isExtra) {
-    if (fut) {
-      const t5 = fut.top5 || {};
-      const t10 = fut.top10 || {};
-      futHtml = `
-        <div class="fut">
-          <div class="fut-head">
-            <small>✅ 期貨未平倉（大額交易人）</small>
-            ${futDate ? `<span class="pill pill-mini">資料日 ${escapeHtml(futDate)}</span>` : ""}
-          </div>
-          <div class="fut-grid">
-            <div class="fut-row">
-              <span class="pill pill-mini">前五大</span>
-              <span class="mono">多 ${fmtInt(t5.long)} / 空 ${fmtInt(t5.short)} / 淨 ${fmtInt(t5.net)}</span>
-            </div>
-            <div class="fut-row">
-              <span class="pill pill-mini">前十大</span>
-              <span class="mono">多 ${fmtInt(t10.long)} / 空 ${fmtInt(t10.short)} / 淨 ${fmtInt(t10.net)}</span>
-            </div>
-            <div class="fut-row">
-              <span class="pill pill-mini">未平倉</span>
-              <span class="mono">${fmtInt(fut.open_interest)}</span>
-            </div>
-          </div>
-        </div>
-      `;
-    } else {
-      futHtml = `
-        <div class="fut">
-          <div class="fut-head">
-            <small>✅ 期貨未平倉（大額交易人）</small>
-            ${futDate ? `<span class="pill pill-mini">資料日 ${escapeHtml(futDate)}</span>` : ""}
-          </div>
-          <div class="muted">
-            目前抓不到資料${futError ? `：${escapeHtml(futError)}` : "（TAIFEX 可能維護或版面變動）"}
-          </div>
-        </div>
-      `;
+  const pill = el("span", "pill", stock.ticker);
+  left.appendChild(pill);
+
+  const h = el("h3", null, stockTitle(stock.name, stock.ticker));
+  left.appendChild(h);
+
+  // close
+  const kv = el("div", "kv");
+  kv.appendChild(el("div", null, `收盤 ${fmtNum(stock.close, 2)}`));
+
+  // change + pct
+  const chgBadge = badgeForChange(stock.change);
+  const chgWrap = el("div");
+  const chgP = el("span", chgBadge.cls, chgBadge.label);
+  chgWrap.appendChild(chgP);
+  chgWrap.appendChild(el("span", "muted", ` ${fmtSigned(stock.pct, 2)}%`));
+  kv.appendChild(chgWrap);
+
+  left.appendChild(kv);
+  top.appendChild(left);
+
+  // right tabs (你原本的按鈕群)
+  const right = el("div", "tabs");
+  ["法說", "營收", "重大訊息", "產能", "美國出口管制"].forEach(t => {
+    const b = el("button", "tab", t);
+    b.type = "button";
+    right.appendChild(b);
+  });
+  top.appendChild(right);
+
+  card.appendChild(top);
+
+  // 外資
+  const foreign = stock.foreign || {};
+  const foreignRow = el("div", "row");
+  foreignRow.appendChild(el("div", null, "外資買賣超(張)"));
+
+  if (foreign.error) {
+    foreignRow.appendChild(el("div", "muted", foreign.error));
+  } else {
+    const lots = Number(foreign.net_lots);
+    const pillToday = el("span", "pill", `${stock.ticker}-${fmtNum(lots, 0)}`);
+    // 只針對外資做顏色
+    if (lots > 0) pillToday.classList.add("pill-pos");
+    else if (lots < 0) pillToday.classList.add("pill-neg");
+    foreignRow.appendChild(pillToday);
+
+    const b = badgeForForeignLots(lots);
+    if (b) {
+      const bb = el("span", b.cls, b.label);
+      foreignRow.appendChild(bb);
     }
-  } else if (!isExtra) {
-    // 固定四檔以外（理論上沒有）
-    futHtml = `
-      <div class="fut">
-        <div class="fut-head"><small>✅ 期貨未平倉（大額交易人）</small></div>
-        <div class="muted">此欄位目前只支援：2330/2317/3231/2382</div>
-      </div>
-    `;
+  }
+  card.appendChild(foreignRow);
+
+  // TAIFEX（只對固定 4 檔）
+  if (TAIFEX_SUPPORTED.has(stock.ticker)) {
+    const tfBox = el("div", "row");
+    const title = el("div", null, "期貨未平倉（大額交易人）");
+    tfBox.appendChild(title);
+
+    const body = el("div");
+    if (!taifexInfo || taifexInfo.error) {
+      body.appendChild(el("div", "muted", taifexInfo?.error || "目前抓不到資料"));
+    } else {
+      const top5 = taifexInfo.top5 || {};
+      const top10 = taifexInfo.top10 || {};
+      body.appendChild(el("div", "muted", `所有契約｜前五大：多 ${fmtInt(top5.long)} / 空 ${fmtInt(top5.short)} / 淨 ${fmtInt(top5.net)}`));
+      body.appendChild(el("div", "muted", `所有契約｜前十大：多 ${fmtInt(top10.long)} / 空 ${fmtInt(top10.short)} / 淨 ${fmtInt(top10.net)}`));
+      body.appendChild(el("div", "muted", `未平倉量：${fmtInt(taifexInfo.oi)}`));
+    }
+    tfBox.appendChild(body);
+    card.appendChild(tfBox);
   }
 
-  // 自選：不顯示新聞 tabs（避免變複雜）
-  card.innerHTML = `
-    <div class="row">
-      <div style="flex:1">
-        <div class="kv">
-          <span class="pill">${escapeHtml(ticker)}</span>
-          <strong>${escapeHtml(name || (isExtra ? "自選" : ""))}</strong>
-        </div>
-
-        <div style="margin-top:6px">
-          <small>收盤</small> <strong>${price.close ?? "-"}</strong>
-          <span class="metric" style="margin-left:10px">
-            <small>漲跌</small>
-            <span class="badge ${trend.cls} ${trend.lv}">${trend.icon} ${price.change ?? "-"}</span>
-            <small class="muted">(${price.change_pct ?? "-"})</small>
-          </span>
-        </div>
-
-        <div style="margin-top:6px">
-          <small>外資買賣超(張)</small>
-          <div class="kv" style="margin-top:4px">
-            <span class="pill ${foreignVal > 0 ? "pill-pos" : foreignVal < 0 ? "pill-neg" : ""}">
-              ${escapeHtml(data.latest_trading_day || "")}: ${f.D0 ?? "-"}
-            </span>
-            ${
-              f.D1 !== undefined
-                ? `<span class="pill">${escapeHtml(data.prev_trading_day || "")}: ${f.D1 ?? "-"}</span>`
-                : ""
-            }
-            ${
-              foreignTagObj
-                ? `<span class="badge ${foreignTagObj.cls} ${foreignTagObj.lv}">💰 ${escapeHtml(foreignTagObj.text)}</span>`
-                : ""
-            }
-          </div>
-        </div>
-
-        ${futHtml}
-      </div>
-    </div>
-  `;
   return card;
 }
 
-// -------------------- render: extra UI --------------------
-function renderExtraUI() {
-  const wrap = document.querySelector("#extra");
-  if (!wrap) return;
+function renderStocks(data, customStocks) {
+  const grid = $("#stockGrid");
+  grid.innerHTML = "";
 
-  const [a0, b0] = readExtraTickers();
+  // 固定 4 檔
+  for (const tk of FIXED) {
+    const s = data.stocks?.[tk];
+    if (!s) continue;
+    grid.appendChild(stockCardFromData(s, data.taifex?.[tk]));
+  }
 
-  wrap.innerHTML = `
-    <div class="kv" style="gap:10px; align-items:center;">
-      <div>
-        <small>加股票 1（4碼）</small><br/>
-        <input id="ex1" value="${escapeHtml(a0)}" placeholder="例如 2303" style="width:120px;padding:8px;border-radius:10px;border:1px solid #2a3c55;background:#0d1420;color:#cfe0f3;">
-      </div>
-      <div>
-        <small>加股票 2（4碼）</small><br/>
-        <input id="ex2" value="${escapeHtml(b0)}" placeholder="例如 0050" style="width:120px;padding:8px;border-radius:10px;border:1px solid #2a3c55;background:#0d1420;color:#cfe0f3;">
-      </div>
-      <div style="margin-top:18px; display:flex; gap:8px;">
-        <button id="apply" class="tab active">套用</button>
-        <button id="clear" class="tab">清空</button>
-      </div>
-    </div>
-    <div class="muted" style="margin-top:10px">
-      自選股存在 localStorage；不影響固定 4 檔 GitHub Actions 更新。
-    </div>
-  `;
-
-  wrap.querySelector("#apply")?.addEventListener("click", () => {
-    const a = normTicker(wrap.querySelector("#ex1")?.value);
-    const b = normTicker(wrap.querySelector("#ex2")?.value);
-    writeExtraTickers(a, b);
-    location.reload();
-  });
-
-  wrap.querySelector("#clear")?.addEventListener("click", () => {
-    writeExtraTickers("", "");
-    location.reload();
-  });
+  // 自選 2 檔（放在固定 4 檔後面）
+  for (const s of customStocks) {
+    const card = stockCardFromData(s, null);
+    // 自選標記（讓你一眼看出來）
+    const tag = card.querySelector(".pill");
+    if (tag) tag.textContent = s.ticker + "  自選";
+    grid.appendChild(card);
+  }
 }
 
-// -------------------- parse: ZGB --------------------
-// 目標：從 raw 文字中找到「券商名稱/買進金額/賣出金額/差額」那段，且排除「6442光聖」這種股票列
-function parseZgb(raw) {
-  if (!raw) return { date: null, rows: [], error: "ZGB 無資料" };
+function renderZGB(data) {
+  const box = $("#zgbBox");
+  box.innerHTML = "";
 
-  const text = String(raw);
-  const mDate = text.match(/資料日期：(\d{8})/);
-  const date = mDate ? mDate[1] : null;
-
-  const lines = text
-    .split("\n")
-    .map((s) => s.trim())
-    .filter((s) => s.length);
-
-  const header = ["券商名稱", "買進金額", "賣出金額", "差額"];
-
-  // 找出所有 header 出現的位置
-  const idxs = [];
-  for (let i = 0; i < lines.length - 4; i++) {
-    if (
-      lines[i] === header[0] &&
-      lines[i + 1] === header[1] &&
-      lines[i + 2] === header[2] &&
-      lines[i + 3] === header[3]
-    ) {
-      idxs.push(i);
-    }
+  const zgb = data.fubon_zgb || {};
+  if (zgb.error) {
+    box.appendChild(el("div", "card", zgb.error));
+    return;
   }
-
-  function isBrokerName(name) {
-    // 排除「代號+股票名」那種（以數字開頭）
-    return name && !/^\d/.test(name);
-  }
-
-  function parseAt(i) {
-    const rows = [];
-    let j = i + 4;
-
-    // 往下每 4 行一組：name/buy/sell/diff
-    while (j + 3 < lines.length) {
-      const name = lines[j];
-      const buy = lines[j + 1];
-      const sell = lines[j + 2];
-      const diff = lines[j + 3];
-
-      // buy/sell/diff 必須是數字
-      const nb = toNumber(buy);
-      const ns = toNumber(sell);
-      const nd = toNumber(diff);
-      if (nb === null || ns === null || nd === null) break;
-
-      // 避免吃到股票列：用 name 是否以數字開頭判斷
-      if (isBrokerName(name)) {
-        rows.push({ name, buy: nb, sell: ns, diff: nd });
-      }
-
-      j += 4;
-
-      // 夠 6 家就停
-      if (rows.length >= 6) break;
-    }
-    return rows;
-  }
-
-  // 可能有多段 header：挑「解析到最多券商」的那段
-  let best = [];
-  for (const i of idxs) {
-    const rows = parseAt(i);
-    if (rows.length > best.length) best = rows;
-  }
-
-  if (!best.length) {
-    return { date, rows: [], error: "ZGB 找不到『券商』段落（可能版面變更）" };
-  }
-
-  return { date, rows: best.slice(0, 6), error: null };
-}
-
-function renderZgb(data) {
-  const box = document.querySelector("#zgb");
-  if (!box) return;
-
-  const z = parseZgb(data?.fubon_zgb?.raw);
-  if (z.error) {
-    box.innerHTML = `<div class="bad">${escapeHtml(z.error)}</div>`;
+  const rows = zgb.rows || [];
+  if (!rows.length) {
+    box.appendChild(el("div", "card", "ZGB 無資料"));
     return;
   }
 
-  const rows = z.rows || [];
-  const dateText = z.date ? `資料日：${z.date}` : "";
+  const card = el("div", "card");
+  card.appendChild(el("div", null, "券商分點進出金額排行（ZGB）—指定 6 家"));
 
-  const html = `
-    <div class="kv">
-      ${dateText ? `<span class="pill">${escapeHtml(dateText)}</span>` : ""}
-    </div>
-    <table>
-      <thead>
-        <tr>
-          <th>券商</th><th>買進金額</th><th>賣出金額</th><th>差額</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${rows
-          .map(
-            (r) => `
-          <tr>
-            <td>${escapeHtml(r.name)}</td>
-            <td>${fmtInt(r.buy)}</td>
-            <td>${fmtInt(r.sell)}</td>
-            <td>${fmtInt(r.diff)}</td>
-          </tr>`
-          )
-          .join("")}
-      </tbody>
-    </table>
-  `;
-  box.innerHTML = html;
-}
+  const table = el("table");
+  const thead = el("thead");
+  const trh = el("tr");
+  ["券商", "買進金額", "賣出金額", "差額"].forEach(h => trh.appendChild(el("th", null, h)));
+  thead.appendChild(trh);
+  table.appendChild(thead);
 
-// -------------------- parse+render: ZGK_D --------------------
-function parseZgkD(raw) {
-  if (!raw) return { date: null, rows: [], error: "ZGK_D 無資料" };
-  const text = String(raw);
-
-  // 日期通常長這樣：日期：12/30
-  const mDate = text.match(/日期：([0-9]{1,2}\/[0-9]{1,2})/);
-  const date = mDate ? mDate[1] : null;
-
-  const lines = text
-    .split("\n")
-    .map((s) => s.trim())
-    .filter((s) => s.length);
-
-  // 找到表頭那一列開始的位置（出現一次就好）
-  const headIdx = lines.findIndex(
-    (s, i) =>
-      s === "名次" &&
-      lines[i + 1] === "股票名稱" &&
-      lines[i + 2] === "超張數" &&
-      lines[i + 3] === "收盤價" &&
-      lines[i + 4] === "漲跌"
-  );
-  if (headIdx < 0) return { date, buy: [], sell: [], error: "ZGK_D 找不到表頭" };
-
-  const buy = [];
-  const sell = [];
-
-  // 之後每一筆資料是 10 格：rank,name,vol,close,chg, rank2,name2,vol2,close2,chg2
-  let j = headIdx + 5;
-  while (j + 9 < lines.length) {
-    const r1 = lines[j];
-    if (!/^\d+$/.test(r1)) break;
-
-    const rowBuy = {
-      rank: toNumber(lines[j]),
-      name: lines[j + 1],
-      vol: toNumber(lines[j + 2]),
-      close: toNumber(lines[j + 3]),
-      chg: toNumber(lines[j + 4]),
-    };
-
-    const r2 = lines[j + 5];
-    const rowSell = {
-      rank: toNumber(lines[j + 5]),
-      name: lines[j + 6],
-      vol: toNumber(lines[j + 7]),
-      close: toNumber(lines[j + 8]),
-      chg: toNumber(lines[j + 9]),
-    };
-
-    buy.push(rowBuy);
-    if (/^\d+$/.test(r2)) sell.push(rowSell);
-
-    j += 10;
-
-    // 通常 50 筆就夠了
-    if (buy.length >= 50) break;
+  const tbody = el("tbody");
+  for (const r of rows) {
+    const tr = el("tr");
+    tr.appendChild(el("td", null, r.broker));
+    tr.appendChild(el("td", null, fmtInt(r.buy)));
+    tr.appendChild(el("td", null, fmtInt(r.sell)));
+    tr.appendChild(el("td", null, fmtInt(r.diff)));
+    tbody.appendChild(tr);
   }
-
-  return { date, buy, sell, error: null };
+  table.appendChild(tbody);
+  card.appendChild(table);
+  box.appendChild(card);
 }
 
-function renderZgkD(data) {
-  const box = document.querySelector("#zgk");
-  if (!box) return;
+function renderZGK(data) {
+  const box = $("#zgkBox");
+  box.innerHTML = "";
 
-  const z = parseZgkD(data?.fubon_zgk_d?.raw);
-  if (z.error) {
-    box.innerHTML = `<div class="bad">${escapeHtml(z.error)}</div>`;
+  const zgk = data.fubon_zgk_d || {};
+  if (zgk.error) {
+    box.appendChild(el("div", "card", zgk.error));
     return;
   }
 
-  const dateText = z.date ? `日期：${z.date}` : "";
+  const buy = zgk.buy || [];
+  const sell = zgk.sell || [];
 
-  box.innerHTML = `
-    <div class="kv">
-      ${dateText ? `<span class="pill">${escapeHtml(dateText)}</span>` : ""}
-    </div>
-    <table>
-      <thead>
-        <tr>
-          <th colspan="5">買超</th>
-          <th colspan="5">賣超</th>
-        </tr>
-        <tr>
-          <th>#</th><th>股票</th><th>超張數</th><th>收盤</th><th>漲跌</th>
-          <th>#</th><th>股票</th><th>超張數</th><th>收盤</th><th>漲跌</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${Array.from({ length: Math.max(z.buy.length, z.sell.length) })
-          .map((_, i) => {
-            const b = z.buy[i];
-            const s = z.sell[i];
-            return `
-              <tr>
-                <td>${b ? b.rank ?? "" : ""}</td>
-                <td>${b ? escapeHtml(b.name) : ""}</td>
-                <td>${b ? fmtInt(b.vol) : ""}</td>
-                <td>${b ? (b.close ?? "") : ""}</td>
-                <td>${b ? (b.chg ?? "") : ""}</td>
-                <td>${s ? s.rank ?? "" : ""}</td>
-                <td>${s ? escapeHtml(s.name) : ""}</td>
-                <td>${s ? fmtInt(s.vol) : ""}</td>
-                <td>${s ? (s.close ?? "") : ""}</td>
-                <td>${s ? (s.chg ?? "") : ""}</td>
-              </tr>
-            `;
-          })
-          .join("")}
-      </tbody>
-    </table>
-  `;
+  const card = el("div", "card");
+  const title = el("div", null, `外資買賣超排行（ZGK_D）${zgk.date ? `（日期：${zgk.date}）` : ""}`);
+  card.appendChild(title);
+
+  const table = el("table");
+  const thead = el("thead");
+  const trh = el("tr");
+  ["#", "股票", "超張數", "收盤", "漲跌", "#", "股票", "超張數", "收盤", "漲跌"].forEach(h => trh.appendChild(el("th", null, h)));
+  thead.appendChild(trh);
+  table.appendChild(thead);
+
+  const tbody = el("tbody");
+  const n = Math.max(buy.length, sell.length);
+  for (let i = 0; i < n; i++) {
+    const b = buy[i];
+    const s = sell[i];
+    const tr = el("tr");
+
+    if (b) {
+      tr.appendChild(el("td", null, String(b.rank)));
+      tr.appendChild(el("td", null, b.name));
+      tr.appendChild(el("td", null, fmtNum(b.lots, 0)));
+      tr.appendChild(el("td", null, fmtNum(b.close, 2)));
+
+      const bd = badgeForChange(b.chg);
+      const td = el("td");
+      td.appendChild(el("span", bd.cls, bd.label));
+      tr.appendChild(td);
+    } else {
+      for (let k = 0; k < 5; k++) tr.appendChild(el("td", null, ""));
+    }
+
+    if (s) {
+      tr.appendChild(el("td", null, String(s.rank)));
+      tr.appendChild(el("td", null, s.name));
+      tr.appendChild(el("td", null, fmtNum(s.lots, 0)));
+      tr.appendChild(el("td", null, fmtNum(s.close, 2)));
+
+      const bd = badgeForChange(s.chg);
+      const td = el("td");
+      td.appendChild(el("span", bd.cls, bd.label));
+      tr.appendChild(td);
+    } else {
+      for (let k = 0; k < 5; k++) tr.appendChild(el("td", null, ""));
+    }
+
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  card.appendChild(table);
+  box.appendChild(card);
 }
 
-// -------------------- init --------------------
-(async function init() {
+/* ---------------------------
+ * Boot
+ * --------------------------- */
+async function main() {
+  renderCustomInputs();
+
+  const data = await fetchJson(DATA_URL);
+  renderHeader(data);
+
+  // 自選 2 檔：前端抓 TWSE（同樣算 close/change/pct + 外資張）
+  const latestYmd = data.latest_trading_day_ymd;
+  let t86Map = null;
   try {
-    const data = await loadData();
-
-    // meta
-    const meta = document.querySelector("#meta");
-    if (meta) {
-      meta.textContent = `更新時間：${data.generated_at || "-"} ｜ 最新交易日：${data.latest_trading_day || "-"} ｜ 前一交易日：${
-        data.prev_trading_day || "-"
-      }`;
-    }
-
-    // extra UI
-    renderExtraUI();
-
-    // stocks grid
-    const grid = document.querySelector("#stocks");
-    if (grid) {
-      grid.innerHTML = "";
-
-      // 固定 4 檔（由 data.json）
-      const fixed = Object.values(data.stocks || {});
-      fixed.forEach((s) => grid.appendChild(renderStockCard(s, data)));
-
-      // 自選 2 檔（前端即時抓，不影響固定 4 檔）
-      const [a, b] = readExtraTickers().map(normTicker);
-      const extras = [a, b].filter((x) => x && !fixed.some((s) => String(s.ticker) === String(x)));
-
-      for (const t of extras) {
-        try {
-          const price = await fetchTwsePrice(t);
-          const foreign = await fetchTwseForeignD0(t);
-          const obj = {
-            ticker: t,
-            name: "",
-            price: {
-              close: price.close,
-              change: price.change,
-              change_pct: price.change_pct,
-            },
-            foreign_net_shares: { D0: foreign.D0 },
-          };
-          grid.appendChild(renderStockCard(obj, data, { isExtra: true }));
-        } catch (e) {
-          const errCard = document.createElement("div");
-          errCard.className = "card";
-          errCard.innerHTML = `<div class="kv"><span class="pill">${escapeHtml(t)}</span><strong>自選</strong></div>
-            <div class="bad" style="margin-top:8px">抓不到資料：${escapeHtml(e?.message || e)}</div>`;
-          grid.appendChild(errCard);
-        }
-      }
-    }
-
-    // ZGB / ZGK_D
-    renderZgb(data);
-    renderZgkD(data);
+    t86Map = await fetchTwseT86Map(latestYmd);
   } catch (e) {
-    const meta = document.querySelector("#meta");
-    if (meta) meta.textContent = "載入失敗";
-    const stocks = document.querySelector("#stocks");
-    if (stocks) stocks.innerHTML = `<div class="card"><strong>載入失敗</strong><div class="muted">${escapeHtml(e)}</div></div>`;
+    // 自選也不擋整頁
+    t86Map = null;
   }
-})();
 
+  const custom = [];
+  const c1 = (localStorage.getItem(LS_KEY_1) || "").trim();
+  const c2 = (localStorage.getItem(LS_KEY_2) || "").trim();
+  const customTickers = [c1, c2].filter(x => x);
 
+  for (const tk of customTickers) {
+    try {
+      const s = await fetchTwseStockDay(latestYmd, tk);
+      const f = t86Map?.get(tk);
+      s.foreign = f ? f : { error: (t86Map ? "T86 找不到該代碼" : "T86 取得失敗") };
+      custom.push(s);
+    } catch (e) {
+      custom.push({
+        ticker: tk,
+        name: "自選",
+        close: null,
+        change: null,
+        pct: null,
+        foreign: { error: String(e.message || e) },
+      });
+    }
+  }
 
+  renderStocks(data, custom);
+  renderZGB(data);
+  renderZGK(data);
+}
 
+main().catch(err => {
+  console.error(err);
+  const root = $("#root");
+  if (root) root.innerHTML = `<div class="card">載入失敗：${String(err.message || err)}</div>`;
+});
