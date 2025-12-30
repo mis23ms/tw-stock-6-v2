@@ -1,9 +1,13 @@
+// docs/app.js
 const DATA_URL = "./data.json";
-const EXTRA_LS_KEY = "tw-stock-06.extraTickers.v2"; // 換 key，避免舊資料怪狀
+
+// 固定：只支援這四檔的 TAIFEX 股票期貨
 const FUTURES_SUPPORTED = new Set(["2330", "2317", "3231", "2382"]);
 
-let renderSeq = 0; // ✅ 用來避免 render 競態造成重複卡片
+// 自選 2 檔：存在 localStorage（不影響固定 4 檔）
+const LS_KEY = "tw-stock-extra-2";
 
+// -------------------- utils --------------------
 function escapeHtml(s) {
   return String(s ?? "")
     .replaceAll("&", "&amp;")
@@ -26,11 +30,13 @@ function fmtInt(n) {
   return Math.trunc(num).toLocaleString("en-US");
 }
 
-function parseSignedPercent(s) {
-  const n = toNumber(s);
-  return n === null ? null : n;
+function fmtFloat(n, digits = 2) {
+  const num = typeof n === "number" ? n : toNumber(n);
+  if (num === null || Number.isNaN(num)) return "-";
+  return num.toFixed(digits);
 }
 
+// 台股習慣：紅=上漲/買超、綠=下跌/賣超
 function trendInfo(change, changePct) {
   const c = change ?? 0;
   const p = changePct ?? 0;
@@ -41,189 +47,88 @@ function trendInfo(change, changePct) {
   return { cls: "flat", lv: "lv1", icon: "➖" };
 }
 
-function foreignTag(netLots) {
-  if (netLots === null || netLots === undefined) return null;
-  const absN = Math.abs(netLots);
-  if (absN < 800) return null;
-  if (netLots >= 3000) return { text: "強買超", cls: "pos", lv: "lv3" };
-  if (netLots >= 800) return { text: "買超", cls: "pos", lv: "lv2" };
-  if (netLots <= -3000) return { text: "強賣超", cls: "neg", lv: "lv3" };
+function foreignTag(net) {
+  if (net === null || net === undefined) return null;
+  const absN = Math.abs(net);
+  if (absN < 800) return null; // <800 不標
+  if (net >= 3000) return { text: "強買超", cls: "pos", lv: "lv3" };
+  if (net >= 800) return { text: "買超", cls: "pos", lv: "lv2" };
+  if (net <= -3000) return { text: "強賣超", cls: "neg", lv: "lv3" };
   return { text: "賣超", cls: "neg", lv: "lv2" };
 }
 
+// -------------------- load data.json --------------------
 async function loadData() {
   const r = await fetch(DATA_URL, { cache: "no-store" });
   if (!r.ok) throw new Error("load data.json failed");
   return r.json();
 }
 
-function getExtraTickers() {
+// -------------------- extra tickers (localStorage) --------------------
+function readExtraTickers() {
   try {
-    const raw = localStorage.getItem(EXTRA_LS_KEY);
-    const arr = raw ? JSON.parse(raw) : [];
-    if (!Array.isArray(arr)) return [];
-    return arr.map((x) => String(x || "").trim()).filter(Boolean).slice(0, 2);
+    const raw = localStorage.getItem(LS_KEY);
+    if (!raw) return ["", ""];
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return ["", ""];
+    return [String(arr[0] ?? ""), String(arr[1] ?? "")];
   } catch {
-    return [];
-  }
-}
-function setExtraTickers(list) {
-  localStorage.setItem(EXTRA_LS_KEY, JSON.stringify(list.slice(0, 2)));
-}
-function isValidTicker(t) {
-  return /^[0-9]{4,6}$/.test(String(t || "").trim());
-}
-function uniq2(list) {
-  const out = [];
-  for (const x of list) {
-    if (!x) continue;
-    if (!out.includes(x)) out.push(x);
-    if (out.length >= 2) break;
-  }
-  return out;
-}
-
-/* -------- extra fetch (前端即時) -------- */
-async function fetchTwseCodeName(ticker) {
-  try {
-    const url = `https://www.twse.com.tw/rwd/zh/api/codeQuery?query=${encodeURIComponent(ticker)}`;
-    const r = await fetch(url, { cache: "no-store" });
-    if (!r.ok) return null;
-    const j = await r.json();
-    const arr = j.suggestions || [];
-    if (!arr.length) return null;
-    const first = String(arr[0] || "");
-    const parts = first.split("\t");
-    return parts.length >= 2 ? parts[1].trim() : null;
-  } catch {
-    return null;
+    return ["", ""];
   }
 }
 
-function rocToAd(roc) {
-  const m = String(roc).match(/^(\d{2,3})\/(\d{1,2})\/(\d{1,2})$/);
-  if (!m) return null;
-  const y = Number(m[1]) + 1911;
-  const mm = String(m[2]).padStart(2, "0");
-  const dd = String(m[3]).padStart(2, "0");
-  return `${y}-${mm}-${dd}`;
+function writeExtraTickers(a, b) {
+  localStorage.setItem(LS_KEY, JSON.stringify([a, b]));
 }
 
-async function fetchPriceChangePct(ticker, latestTradingDay) {
-  try {
-    const ymd = latestTradingDay.replaceAll("-", "");
-    const url = `https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date=${ymd}&stockNo=${ticker}`;
-    const r = await fetch(url, { cache: "no-store" });
-    if (!r.ok) throw new Error("TWSE STOCK_DAY failed");
-    const j = await r.json();
-    const rows = j.data || [];
-    if (!rows.length) throw new Error("no rows");
+function normTicker(s) {
+  const t = String(s ?? "").trim();
+  if (!t) return "";
+  // 允許 4~6 位（ETF/REIT 也有 4 位；有些市場可能 5~6）
+  if (!/^\d{4,6}$/.test(t)) return "";
+  return t;
+}
 
-    const parsed = [];
-    for (const row of rows) {
-      const ad = rocToAd(row[0]);
-      const close = toNumber(row[6]);
-      const chg = toNumber(row[7]);
-      if (ad && close !== null && chg !== null) parsed.push({ ad, close, chg });
+// -------------------- client-side fetch for extra tickers --------------------
+// 用 TWSE STOCK_DAY（月資料）抓最近兩筆收盤 -> 算 change / pct
+async function fetchTwsePrice(ticker) {
+  const now = new Date();
+  // 用當月 01（TWSE 要 YYYYMMDD）
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, "0");
+  const date = `${y}${m}01`;
+  const url = `https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&stockNo=${ticker}&date=${date}`;
+  const r = await fetch(url, { cache: "no-store" });
+  if (!r.ok) throw new Error("TWSE 取價失敗");
+  const j = await r.json();
+  const rows = j?.data || [];
+  if (!rows.length) throw new Error("TWSE 無資料");
+  // rows: [日期(民國), 成交股數, 成交金額, 開, 高, 低, 收, 漲跌價差, 成交筆數]
+  const last = rows[rows.length - 1];
+  const prev = rows.length >= 2 ? rows[rows.length - 2] : null;
+  const close = toNumber(last?.[6]);
+  const prevClose = prev ? toNumber(prev?.[6]) : null;
+  const change = prevClose === null || close === null ? null : close - prevClose;
+  const changePct = prevClose ? (change / prevClose) * 100 : null;
+  return { close, change, change_pct: changePct };
+}
+
+// 外資：前端只做「最新日」即可（自選只要求顯示，不要搞到很重）
+async function fetchTwseForeignD0(ticker) {
+  const url = `https://www.twse.com.tw/rwd/zh/fund/T86?response=json&selectType=ALLBUT0999&date=&_=1`;
+  const r = await fetch(url, { cache: "no-store" });
+  if (!r.ok) return { D0: null };
+  const j = await r.json();
+  const data = j?.data || [];
+  for (const row of data) {
+    if (String(row?.[0] ?? "").trim() === String(ticker)) {
+      return { D0: row?.[4] ?? null };
     }
-    parsed.sort((a, b) => (a.ad > b.ad ? 1 : -1));
-    let idx = parsed.findIndex((x) => x.ad === latestTradingDay);
-    if (idx < 0) idx = parsed.length - 1;
-    const cur = parsed[idx];
-
-    const prevClose = idx - 1 >= 0 ? parsed[idx - 1].close : null;
-    const pct = prevClose ? ((cur.close - prevClose) / prevClose) * 100 : null;
-
-    const closeStr = String(cur.close).replace(/\.0+$/, "");
-    const chgStr = (cur.chg > 0 ? "+" : "") + String(cur.chg).replace(/\.0+$/, "");
-    const pctStr = pct === null ? null : (pct > 0 ? "+" : "") + pct.toFixed(2) + "%";
-
-    return { close: closeStr, change: chgStr, change_pct: pctStr };
-  } catch {
-    return { close: null, change: null, change_pct: null };
   }
+  return { D0: null };
 }
 
-async function fetchForeignLots(ticker, ymd) {
-  try {
-    const url = `https://www.twse.com.tw/rwd/zh/fund/T86?response=json&selectType=ALLBUT0999&date=${ymd.replaceAll("-", "")}`;
-    const r = await fetch(url, { cache: "no-store" });
-    if (!r.ok) return null;
-    const j = await r.json();
-    const data = j.data || [];
-    for (const row of data) {
-      if (String(row[0]).trim() === String(ticker)) {
-        const netShares = toNumber(row[4]);
-        if (netShares === null) return null;
-        const lots = Math.round(netShares / 1000);
-        return lots.toLocaleString("en-US");
-      }
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-async function fetchExtraStock(ticker, data) {
-  const name = (await fetchTwseCodeName(ticker)) || ticker;
-  const price = await fetchPriceChangePct(ticker, data.latest_trading_day);
-  const d0 = await fetchForeignLots(ticker, data.latest_trading_day);
-  const d1 = await fetchForeignLots(ticker, data.prev_trading_day);
-  return {
-    ticker,
-    name,
-    price,
-    foreign_net_shares: { D0: d0, D1: d1 },
-    news: { conference: [], revenue: [], material: [], capacity: [], export: [] },
-  };
-}
-
-/* -------- UI: extra inputs -------- */
-function renderExtraUI(onApply, onClear) {
-  const el = document.querySelector("#extra");
-  if (!el) return;
-
-  const stored = getExtraTickers();
-  const v1 = stored[0] || "";
-  const v2 = stored[1] || "";
-
-  el.innerHTML = `
-    <div class="kv" style="gap:14px; align-items:center">
-      <div>
-        <div class="muted" style="font-size:12px; margin-bottom:6px">加股票 1（4 碼）</div>
-        <input id="ex1" value="${escapeHtml(v1)}" inputmode="numeric" maxlength="6"
-               style="width:120px;padding:8px 10px;border-radius:10px;border:1px solid #2a3c55;background:#0d1420;color:#e8eef6" />
-      </div>
-      <div>
-        <div class="muted" style="font-size:12px; margin-bottom:6px">加股票 2（4 碼）</div>
-        <input id="ex2" value="${escapeHtml(v2)}" inputmode="numeric" maxlength="6"
-               style="width:120px;padding:8px 10px;border-radius:10px;border:1px solid #2a3c55;background:#0d1420;color:#e8eef6" />
-      </div>
-
-      <div style="display:flex; gap:10px; align-items:flex-end; padding-bottom:2px">
-        <button id="apply" class="tab" style="padding:8px 12px">套用</button>
-        <button id="clear" class="tab" style="padding:8px 12px">清空</button>
-      </div>
-    </div>
-    <div class="muted" style="margin-top:10px">
-      自選股存在 localStorage；不影響固定 4 檔 GitHub Actions 更新。
-    </div>
-  `;
-
-  const btnApply = el.querySelector("#apply");
-  const btnClear = el.querySelector("#clear");
-
-  btnApply.addEventListener("click", () => {
-    const t1 = (el.querySelector("#ex1").value || "").trim();
-    const t2 = (el.querySelector("#ex2").value || "").trim();
-    onApply([t1, t2], btnApply);
-  });
-
-  btnClear.addEventListener("click", () => onClear(btnClear));
-}
-
-/* -------- cards -------- */
+// -------------------- render: stock card --------------------
 function renderStockCard(s, data, { isExtra = false } = {}) {
   const card = document.createElement("div");
   card.className = "card";
@@ -231,22 +136,23 @@ function renderStockCard(s, data, { isExtra = false } = {}) {
   const price = s.price || {};
   const f = s.foreign_net_shares || {};
   const ticker = String(s.ticker || "");
-  const name = String(s.name || ticker);
+  const name = String(s.name || "");
 
   const changeVal = toNumber(price.change);
-  const changePctVal = parseSignedPercent(price.change_pct);
+  const changePctVal = toNumber(price.change_pct);
   const trend = trendInfo(changeVal, changePctVal);
 
-  const foreignLots = toNumber(f.D0);
-  const tag = foreignTag(foreignLots);
+  const foreignVal = toNumber(f.D0);
+  const foreignTagObj = foreignTag(foreignVal);
 
+  // TAIFEX
   const futAll = data?.taifex_large_trader || {};
   const futDate = futAll.date ? String(futAll.date) : "";
   const futError = futAll.error ? String(futAll.error) : "";
   const fut = futAll.by_ticker ? futAll.by_ticker[ticker] : null;
 
   let futHtml = "";
-  if (FUTURES_SUPPORTED.has(ticker)) {
+  if (FUTURES_SUPPORTED.has(ticker) && !isExtra) {
     if (fut) {
       const t5 = fut.top5 || {};
       const t10 = fut.top10 || {};
@@ -279,259 +185,405 @@ function renderStockCard(s, data, { isExtra = false } = {}) {
             <small>✅ 期貨未平倉（大額交易人）</small>
             ${futDate ? `<span class="pill pill-mini">資料日 ${escapeHtml(futDate)}</span>` : ""}
           </div>
-          <div class="muted">目前抓不到資料${futError ? `：${escapeHtml(futError)}` : ""}</div>
+          <div class="muted">
+            目前抓不到資料${futError ? `：${escapeHtml(futError)}` : "（TAIFEX 可能維護或版面變動）"}
+          </div>
         </div>
       `;
     }
-  } // ✅ 不支援的就不顯示期貨區塊（避免自選股一直看到那段）
+  } else if (!isExtra) {
+    // 固定四檔以外（理論上沒有）
+    futHtml = `
+      <div class="fut">
+        <div class="fut-head"><small>✅ 期貨未平倉（大額交易人）</small></div>
+        <div class="muted">此欄位目前只支援：2330/2317/3231/2382</div>
+      </div>
+    `;
+  }
 
+  // 自選：不顯示新聞 tabs（避免變複雜）
   card.innerHTML = `
     <div class="row">
-      <div style="min-width:0">
+      <div style="flex:1">
         <div class="kv">
           <span class="pill">${escapeHtml(ticker)}</span>
-          <strong>${escapeHtml(name)}</strong>
-          ${isExtra ? `<span class="pill pill-mini">自選</span>` : ""}
+          <strong>${escapeHtml(name || (isExtra ? "自選" : ""))}</strong>
         </div>
 
         <div style="margin-top:6px">
-          <small>收盤</small> <strong>${escapeHtml(price.close ?? "-")}</strong>
+          <small>收盤</small> <strong>${price.close ?? "-"}</strong>
           <span class="metric" style="margin-left:10px">
             <small>漲跌</small>
-            <span class="badge ${trend.cls} ${trend.lv}">${trend.icon} ${escapeHtml(price.change ?? "-")}</span>
-            <small class="muted">(${escapeHtml(price.change_pct ?? "-")})</small>
+            <span class="badge ${trend.cls} ${trend.lv}">${trend.icon} ${price.change ?? "-"}</span>
+            <small class="muted">(${price.change_pct ?? "-"})</small>
           </span>
         </div>
 
         <div style="margin-top:6px">
           <small>外資買賣超(張)</small>
           <div class="kv" style="margin-top:4px">
-            <span class="pill ${foreignLots > 0 ? "pill-pos" : foreignLots < 0 ? "pill-neg" : ""}">
-              ${escapeHtml(data.latest_trading_day)}: ${escapeHtml(f.D0 ?? "-")}
+            <span class="pill ${foreignVal > 0 ? "pill-pos" : foreignVal < 0 ? "pill-neg" : ""}">
+              ${escapeHtml(data.latest_trading_day || "")}: ${f.D0 ?? "-"}
             </span>
-            <span class="pill">
-              ${escapeHtml(data.prev_trading_day)}: ${escapeHtml(f.D1 ?? "-")}
-            </span>
-            ${tag ? `<span class="badge ${tag.cls} ${tag.lv}">💰 ${escapeHtml(tag.text)}</span>` : ""}
+            ${
+              f.D1 !== undefined
+                ? `<span class="pill">${escapeHtml(data.prev_trading_day || "")}: ${f.D1 ?? "-"}</span>`
+                : ""
+            }
+            ${
+              foreignTagObj
+                ? `<span class="badge ${foreignTagObj.cls} ${foreignTagObj.lv}">💰 ${escapeHtml(foreignTagObj.text)}</span>`
+                : ""
+            }
           </div>
         </div>
 
         ${futHtml}
       </div>
-
-      <div class="tabs">
-        <button class="tab active" data-cat="conference">法說</button>
-        <button class="tab" data-cat="revenue">營收</button>
-        <button class="tab" data-cat="material">重大訊息</button>
-        <button class="tab" data-cat="capacity">產能</button>
-        <button class="tab" data-cat="export">美國出口管制</button>
-      </div>
     </div>
-
-    <div class="news" data-box></div>
   `;
-
-  const tabs = Array.from(card.querySelectorAll(".tab"));
-  const box = card.querySelector("[data-box]");
-
-  function renderList(cat) {
-    const list = (s.news && s.news[cat]) || [];
-    if (!list.length) {
-      box.innerHTML = `<div class="muted">這類今天沒有抓到新新聞（或資料源暫時無回應）。</div>`;
-      return;
-    }
-    box.innerHTML = list
-      .map(
-        (it) =>
-          `<div class="item">• <a href="${escapeHtml(it.url)}" target="_blank" rel="noreferrer">${escapeHtml(
-            it.title
-          )}</a><div class="muted">${escapeHtml(it.time || "")}</div></div>`
-      )
-      .join("");
-  }
-
-  renderList("conference");
-  tabs.forEach((btn) => {
-    btn.addEventListener("click", () => {
-      tabs.forEach((b) => b.classList.remove("active"));
-      btn.classList.add("active");
-      renderList(btn.dataset.cat);
-    });
-  });
-
   return card;
 }
 
-/* -------- ZGB / ZGK tables from data.json -------- */
-function renderZGB(data) {
-  const el = document.querySelector("#zgb");
-  if (!el) return;
+// -------------------- render: extra UI --------------------
+function renderExtraUI() {
+  const wrap = document.querySelector("#extra");
+  if (!wrap) return;
 
-  const zgb = data.fubon_zgb || {};
-  if (zgb.error) {
-    el.innerHTML = `<div class="bad">${escapeHtml(zgb.error)}</div>`;
-    return;
-  }
-  const rows = zgb.rows || [];
-  if (!rows.length) {
-    el.innerHTML = `<div class="muted">（無資料）</div>`;
-    return;
-  }
+  const [a0, b0] = readExtraTickers();
 
-  const datePill = zgb.date ? `<span class="pill pill-mini">資料日 ${escapeHtml(zgb.date)}</span>` : "";
-  const trs = rows
-    .map(
-      (r) => `
-    <tr>
-      <td>${escapeHtml(r.name ?? "")}</td>
-      <td>${escapeHtml(r.buy ?? "-")}</td>
-      <td>${escapeHtml(r.sell ?? "-")}</td>
-      <td>${escapeHtml(r.diff ?? "-")}</td>
-    </tr>`
-    )
-    .join("");
-
-  el.innerHTML = `
-    <div class="kv">${datePill}</div>
-    <table>
-      <thead>
-        <tr><th>券商名稱</th><th>買進金額</th><th>賣出金額</th><th>差額</th></tr>
-      </thead>
-      <tbody>${trs}</tbody>
-    </table>
+  wrap.innerHTML = `
+    <div class="kv" style="gap:10px; align-items:center;">
+      <div>
+        <small>加股票 1（4碼）</small><br/>
+        <input id="ex1" value="${escapeHtml(a0)}" placeholder="例如 2303" style="width:120px;padding:8px;border-radius:10px;border:1px solid #2a3c55;background:#0d1420;color:#cfe0f3;">
+      </div>
+      <div>
+        <small>加股票 2（4碼）</small><br/>
+        <input id="ex2" value="${escapeHtml(b0)}" placeholder="例如 0050" style="width:120px;padding:8px;border-radius:10px;border:1px solid #2a3c55;background:#0d1420;color:#cfe0f3;">
+      </div>
+      <div style="margin-top:18px; display:flex; gap:8px;">
+        <button id="apply" class="tab active">套用</button>
+        <button id="clear" class="tab">清空</button>
+      </div>
+    </div>
+    <div class="muted" style="margin-top:10px">
+      自選股存在 localStorage；不影響固定 4 檔 GitHub Actions 更新。
+    </div>
   `;
+
+  wrap.querySelector("#apply")?.addEventListener("click", () => {
+    const a = normTicker(wrap.querySelector("#ex1")?.value);
+    const b = normTicker(wrap.querySelector("#ex2")?.value);
+    writeExtraTickers(a, b);
+    location.reload();
+  });
+
+  wrap.querySelector("#clear")?.addEventListener("click", () => {
+    writeExtraTickers("", "");
+    location.reload();
+  });
 }
 
-function renderZGK(data) {
-  const el = document.querySelector("#zgk");
-  if (!el) return;
+// -------------------- parse: ZGB --------------------
+// 目標：從 raw 文字中找到「券商名稱/買進金額/賣出金額/差額」那段，且排除「6442光聖」這種股票列
+function parseZgb(raw) {
+  if (!raw) return { date: null, rows: [], error: "ZGB 無資料" };
 
-  const zgk = data.fubon_zgk_d || {};
-  if (zgk.error) {
-    el.innerHTML = `<div class="bad">${escapeHtml(zgk.error)}</div>`;
+  const text = String(raw);
+  const mDate = text.match(/資料日期：(\d{8})/);
+  const date = mDate ? mDate[1] : null;
+
+  const lines = text
+    .split("\n")
+    .map((s) => s.trim())
+    .filter((s) => s.length);
+
+  const header = ["券商名稱", "買進金額", "賣出金額", "差額"];
+
+  // 找出所有 header 出現的位置
+  const idxs = [];
+  for (let i = 0; i < lines.length - 4; i++) {
+    if (
+      lines[i] === header[0] &&
+      lines[i + 1] === header[1] &&
+      lines[i + 2] === header[2] &&
+      lines[i + 3] === header[3]
+    ) {
+      idxs.push(i);
+    }
+  }
+
+  function isBrokerName(name) {
+    // 排除「代號+股票名」那種（以數字開頭）
+    return name && !/^\d/.test(name);
+  }
+
+  function parseAt(i) {
+    const rows = [];
+    let j = i + 4;
+
+    // 往下每 4 行一組：name/buy/sell/diff
+    while (j + 3 < lines.length) {
+      const name = lines[j];
+      const buy = lines[j + 1];
+      const sell = lines[j + 2];
+      const diff = lines[j + 3];
+
+      // buy/sell/diff 必須是數字
+      const nb = toNumber(buy);
+      const ns = toNumber(sell);
+      const nd = toNumber(diff);
+      if (nb === null || ns === null || nd === null) break;
+
+      // 避免吃到股票列：用 name 是否以數字開頭判斷
+      if (isBrokerName(name)) {
+        rows.push({ name, buy: nb, sell: ns, diff: nd });
+      }
+
+      j += 4;
+
+      // 夠 6 家就停
+      if (rows.length >= 6) break;
+    }
+    return rows;
+  }
+
+  // 可能有多段 header：挑「解析到最多券商」的那段
+  let best = [];
+  for (const i of idxs) {
+    const rows = parseAt(i);
+    if (rows.length > best.length) best = rows;
+  }
+
+  if (!best.length) {
+    return { date, rows: [], error: "ZGB 找不到『券商』段落（可能版面變更）" };
+  }
+
+  return { date, rows: best.slice(0, 6), error: null };
+}
+
+function renderZgb(data) {
+  const box = document.querySelector("#zgb");
+  if (!box) return;
+
+  const z = parseZgb(data?.fubon_zgb?.raw);
+  if (z.error) {
+    box.innerHTML = `<div class="bad">${escapeHtml(z.error)}</div>`;
     return;
   }
-  const buy = zgk.buy || [];
-  const sell = zgk.sell || [];
-  if (!buy.length && !sell.length) {
-    el.innerHTML = `<div class="muted">（無資料）</div>`;
-    return;
-  }
 
-  const datePill = zgk.date ? `<span class="pill pill-mini">日期 ${escapeHtml(zgk.date)}</span>` : "";
+  const rows = z.rows || [];
+  const dateText = z.date ? `資料日：${z.date}` : "";
 
-  const maxRows = Math.max(buy.length, sell.length);
-  const trs = [];
-  for (let i = 0; i < maxRows; i++) {
-    const b = buy[i] || {};
-    const s = sell[i] || {};
-    trs.push(`
-      <tr>
-        <td>${escapeHtml(b.rank ?? "")}</td>
-        <td>${escapeHtml((b.ticker ? b.ticker + " " : "") + (b.name ?? ""))}</td>
-        <td>${escapeHtml(b.net ?? "")}</td>
-        <td>${escapeHtml(b.close ?? "")}</td>
-        <td>${escapeHtml(b.change ?? "")}</td>
-
-        <td>${escapeHtml(s.rank ?? "")}</td>
-        <td>${escapeHtml((s.ticker ? s.ticker + " " : "") + (s.name ?? ""))}</td>
-        <td>${escapeHtml(s.net ?? "")}</td>
-        <td>${escapeHtml(s.close ?? "")}</td>
-        <td>${escapeHtml(s.change ?? "")}</td>
-      </tr>
-    `);
-  }
-
-  el.innerHTML = `
-    <div class="kv">${datePill}</div>
+  const html = `
+    <div class="kv">
+      ${dateText ? `<span class="pill">${escapeHtml(dateText)}</span>` : ""}
+    </div>
     <table>
       <thead>
-        <tr><th colspan="5">買超</th><th colspan="5">賣超</th></tr>
+        <tr>
+          <th>券商</th><th>買進金額</th><th>賣出金額</th><th>差額</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows
+          .map(
+            (r) => `
+          <tr>
+            <td>${escapeHtml(r.name)}</td>
+            <td>${fmtInt(r.buy)}</td>
+            <td>${fmtInt(r.sell)}</td>
+            <td>${fmtInt(r.diff)}</td>
+          </tr>`
+          )
+          .join("")}
+      </tbody>
+    </table>
+  `;
+  box.innerHTML = html;
+}
+
+// -------------------- parse+render: ZGK_D --------------------
+function parseZgkD(raw) {
+  if (!raw) return { date: null, rows: [], error: "ZGK_D 無資料" };
+  const text = String(raw);
+
+  // 日期通常長這樣：日期：12/30
+  const mDate = text.match(/日期：([0-9]{1,2}\/[0-9]{1,2})/);
+  const date = mDate ? mDate[1] : null;
+
+  const lines = text
+    .split("\n")
+    .map((s) => s.trim())
+    .filter((s) => s.length);
+
+  // 找到表頭那一列開始的位置（出現一次就好）
+  const headIdx = lines.findIndex(
+    (s, i) =>
+      s === "名次" &&
+      lines[i + 1] === "股票名稱" &&
+      lines[i + 2] === "超張數" &&
+      lines[i + 3] === "收盤價" &&
+      lines[i + 4] === "漲跌"
+  );
+  if (headIdx < 0) return { date, buy: [], sell: [], error: "ZGK_D 找不到表頭" };
+
+  const buy = [];
+  const sell = [];
+
+  // 之後每一筆資料是 10 格：rank,name,vol,close,chg, rank2,name2,vol2,close2,chg2
+  let j = headIdx + 5;
+  while (j + 9 < lines.length) {
+    const r1 = lines[j];
+    if (!/^\d+$/.test(r1)) break;
+
+    const rowBuy = {
+      rank: toNumber(lines[j]),
+      name: lines[j + 1],
+      vol: toNumber(lines[j + 2]),
+      close: toNumber(lines[j + 3]),
+      chg: toNumber(lines[j + 4]),
+    };
+
+    const r2 = lines[j + 5];
+    const rowSell = {
+      rank: toNumber(lines[j + 5]),
+      name: lines[j + 6],
+      vol: toNumber(lines[j + 7]),
+      close: toNumber(lines[j + 8]),
+      chg: toNumber(lines[j + 9]),
+    };
+
+    buy.push(rowBuy);
+    if (/^\d+$/.test(r2)) sell.push(rowSell);
+
+    j += 10;
+
+    // 通常 50 筆就夠了
+    if (buy.length >= 50) break;
+  }
+
+  return { date, buy, sell, error: null };
+}
+
+function renderZgkD(data) {
+  const box = document.querySelector("#zgk");
+  if (!box) return;
+
+  const z = parseZgkD(data?.fubon_zgk_d?.raw);
+  if (z.error) {
+    box.innerHTML = `<div class="bad">${escapeHtml(z.error)}</div>`;
+    return;
+  }
+
+  const dateText = z.date ? `日期：${z.date}` : "";
+
+  box.innerHTML = `
+    <div class="kv">
+      ${dateText ? `<span class="pill">${escapeHtml(dateText)}</span>` : ""}
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th colspan="5">買超</th>
+          <th colspan="5">賣超</th>
+        </tr>
         <tr>
           <th>#</th><th>股票</th><th>超張數</th><th>收盤</th><th>漲跌</th>
           <th>#</th><th>股票</th><th>超張數</th><th>收盤</th><th>漲跌</th>
         </tr>
       </thead>
-      <tbody>${trs.join("")}</tbody>
+      <tbody>
+        ${Array.from({ length: Math.max(z.buy.length, z.sell.length) })
+          .map((_, i) => {
+            const b = z.buy[i];
+            const s = z.sell[i];
+            return `
+              <tr>
+                <td>${b ? b.rank ?? "" : ""}</td>
+                <td>${b ? escapeHtml(b.name) : ""}</td>
+                <td>${b ? fmtInt(b.vol) : ""}</td>
+                <td>${b ? (b.close ?? "") : ""}</td>
+                <td>${b ? (b.chg ?? "") : ""}</td>
+                <td>${s ? s.rank ?? "" : ""}</td>
+                <td>${s ? escapeHtml(s.name) : ""}</td>
+                <td>${s ? fmtInt(s.vol) : ""}</td>
+                <td>${s ? (s.close ?? "") : ""}</td>
+                <td>${s ? (s.chg ?? "") : ""}</td>
+              </tr>
+            `;
+          })
+          .join("")}
+      </tbody>
     </table>
   `;
 }
 
-/* -------- main render -------- */
-async function renderStocks(data, extraTickers, btnToLock) {
-  const mySeq = ++renderSeq; // ✅ 每次 render 都有自己的序號
-  const root = document.querySelector("#stocks");
-  if (!root) return;
-  root.innerHTML = "";
+// -------------------- init --------------------
+(async function init() {
+  try {
+    const data = await loadData();
 
-  const disableBtn = (b, v) => {
-    if (!b) return;
-    b.disabled = v;
-    b.style.opacity = v ? "0.6" : "1";
-    b.style.pointerEvents = v ? "none" : "auto";
-  };
-  disableBtn(btnToLock, true);
-
-  // 固定 4 檔
-  const fixedStocks = Object.values(data.stocks || {});
-  for (const s of fixedStocks) {
-    if (mySeq !== renderSeq) return; // ✅ 被新 render 取代就停止
-    root.appendChild(renderStockCard(s, data, { isExtra: false }));
-  }
-
-  // 自選（去重 + 最多2）
-  const extras = uniq2(extraTickers.map((x) => x.trim()).filter(Boolean).filter(isValidTicker));
-  for (const t of extras) {
-    if (mySeq !== renderSeq) return;
-    try {
-      const ex = await fetchExtraStock(t, data);
-      if (mySeq !== renderSeq) return;
-      root.appendChild(renderStockCard(ex, data, { isExtra: true }));
-    } catch (e) {
-      if (mySeq !== renderSeq) return;
-      const err = document.createElement("div");
-      err.className = "card";
-      err.innerHTML = `<div class="bad">自選 ${escapeHtml(t)} 抓取失敗：${escapeHtml(e)}</div>`;
-      root.appendChild(err);
+    // meta
+    const meta = document.querySelector("#meta");
+    if (meta) {
+      meta.textContent = `更新時間：${data.generated_at || "-"} ｜ 最新交易日：${data.latest_trading_day || "-"} ｜ 前一交易日：${
+        data.prev_trading_day || "-"
+      }`;
     }
-  }
 
-  disableBtn(btnToLock, false);
-}
+    // extra UI
+    renderExtraUI();
 
-async function renderAll() {
-  const data = await loadData();
+    // stocks grid
+    const grid = document.querySelector("#stocks");
+    if (grid) {
+      grid.innerHTML = "";
 
-  const meta = document.querySelector("#meta");
-  if (meta) {
-    meta.textContent = `更新時間：${data.generated_at || "-"} ｜ 最新交易日：${data.latest_trading_day || "-"} ｜ 前一交易日：${
-      data.prev_trading_day || "-"
-    }`;
-  }
+      // 固定 4 檔（由 data.json）
+      const fixed = Object.values(data.stocks || {});
+      fixed.forEach((s) => grid.appendChild(renderStockCard(s, data)));
 
-  renderExtraUI(
-    async (tickers, btn) => {
-      const cleaned = uniq2(tickers.map((t) => t.trim()).filter(Boolean).filter(isValidTicker));
-      setExtraTickers(cleaned);
-      await renderStocks(data, cleaned, btn);
-    },
-    async (btn) => {
-      setExtraTickers([]);
-      await renderStocks(data, [], btn);
+      // 自選 2 檔（前端即時抓，不影響固定 4 檔）
+      const [a, b] = readExtraTickers().map(normTicker);
+      const extras = [a, b].filter((x) => x && !fixed.some((s) => String(s.ticker) === String(x)));
+
+      for (const t of extras) {
+        try {
+          const price = await fetchTwsePrice(t);
+          const foreign = await fetchTwseForeignD0(t);
+          const obj = {
+            ticker: t,
+            name: "",
+            price: {
+              close: price.close,
+              change: price.change,
+              change_pct: price.change_pct,
+            },
+            foreign_net_shares: { D0: foreign.D0 },
+          };
+          grid.appendChild(renderStockCard(obj, data, { isExtra: true }));
+        } catch (e) {
+          const errCard = document.createElement("div");
+          errCard.className = "card";
+          errCard.innerHTML = `<div class="kv"><span class="pill">${escapeHtml(t)}</span><strong>自選</strong></div>
+            <div class="bad" style="margin-top:8px">抓不到資料：${escapeHtml(e?.message || e)}</div>`;
+          grid.appendChild(errCard);
+        }
+      }
     }
-  );
 
-  const extra = uniq2(getExtraTickers().filter(isValidTicker));
-  await renderStocks(data, extra);
+    // ZGB / ZGK_D
+    renderZgb(data);
+    renderZgkD(data);
+  } catch (e) {
+    const meta = document.querySelector("#meta");
+    if (meta) meta.textContent = "載入失敗";
+    const stocks = document.querySelector("#stocks");
+    if (stocks) stocks.innerHTML = `<div class="card"><strong>載入失敗</strong><div class="muted">${escapeHtml(e)}</div></div>`;
+  }
+})();
 
-  renderZGB(data);
-  renderZGK(data);
-}
-
-renderAll().catch((e) => {
-  const meta = document.querySelector("#meta");
-  if (meta) meta.textContent = `載入失敗：${String(e)}`;
-  console.error(e);
-});
 
 
