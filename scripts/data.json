@@ -1,0 +1,93 @@
+{
+  "generated_at": "2025-12-30T22:59:06+08:00",
+  "latest_trading_day": "2025-12-30",
+  "prev_trading_day": "2025-12-29",
+  "latest_trading_day_ymd": "20251230",
+  "prev_trading_day_ymd": "20251229",
+  "stocks": {
+    "2330": {
+      "ticker": "2330",
+      "name": "台積電",
+      "close": 1520.0,
+      "change": -10.0,
+      "pct": -0.6535947712418301,
+      "foreign": {
+        "buy_shares": 7423760,
+        "sell_shares": 9604430,
+        "net_shares": -2180670,
+        "net_lots": -2180.67
+      }
+    },
+    "2317": {
+      "ticker": "2317",
+      "name": "鴻海",
+      "close": 228.0,
+      "change": -3.0,
+      "pct": -1.2987012987012987,
+      "foreign": {
+        "buy_shares": 9279043,
+        "sell_shares": 14878286,
+        "net_shares": -5599243,
+        "net_lots": -5599.243
+      }
+    },
+    "3231": {
+      "ticker": "3231",
+      "name": "緯創",
+      "close": 147.0,
+      "change": 1.0,
+      "pct": 0.684931506849315,
+      "foreign": {
+        "buy_shares": 7079836,
+        "sell_shares": 7232540,
+        "net_shares": -152704,
+        "net_lots": -152.704
+      }
+    },
+    "2382": {
+      "ticker": "2382",
+      "name": "廣達",
+      "close": 263.0,
+      "change": 0.0,
+      "pct": 0.0,
+      "foreign": {
+        "buy_shares": 4046187,
+        "sell_shares": 8245623,
+        "net_shares": -4199436,
+        "net_lots": -4199.436
+      }
+    }
+  },
+  "fubon_zgb": {
+    "error": "ZGB 找不到表格（可能版面變更）",
+    "rows": []
+  },
+  "fubon_zgk_d": {
+    "error": "ZGK_D 找不到表格（可能版面變更）",
+    "buy": [],
+    "sell": [],
+    "source": "https://fubon-ebrokerdj.fbs.com.tw/z/zg/zgk/zgk_d.djhtm"
+  },
+  "taifex": {
+    "2330": {
+      "product": "台積電",
+      "error": "TAIFEX 無法定位『商品』下拉選單/選項（台積電）",
+      "source": "https://www.taifex.com.tw/cht/3/largeTraderFutQry"
+    },
+    "2317": {
+      "product": "鴻海",
+      "error": "TAIFEX 無法定位『商品』下拉選單/選項（鴻海）",
+      "source": "https://www.taifex.com.tw/cht/3/largeTraderFutQry"
+    },
+    "3231": {
+      "product": "緯創",
+      "error": "TAIFEX 無法定位『商品』下拉選單/選項（緯創）",
+      "source": "https://www.taifex.com.tw/cht/3/largeTraderFutQry"
+    },
+    "2382": {
+      "product": "廣達",
+      "error": "TAIFEX 無法定位『商品』下拉選單/選項（廣達）",
+      "source": "https://www.taifex.com.tw/cht/3/largeTraderFutQry"
+    }
+  }
+}
