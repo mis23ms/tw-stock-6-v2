@@ -106,3 +106,25 @@ small{color:#9fb1c6}
 .mono{
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
 }
+/* V2 標色增強 */
+.badge { padding: 2px 6px; border-radius: 4px; font-size: 12px; font-weight: bold; }
+.pos { color: #fff; background-color: #ef5350; } /* 紅色 */
+.neg { color: #fff; background-color: #66bb6a; } /* 綠色 */
+.flat { color: #666; background-color: #eee; }
+
+/* 漲跌/買賣超深淺分級 */
+.lv1 { opacity: 0.6; }
+.lv2 { opacity: 0.8; }
+.lv3 { opacity: 1.0; box-shadow: 0 0 5px rgba(0,0,0,0.2); }
+
+/* 外資專用 Pill */
+.pill-pos { border: 1px solid #ef5350; color: #ef5350; background: #fff1f0; }
+.pill-neg { border: 1px solid #66bb6a; color: #66bb6a; background: #f6ffed; }
+
+.input-field {
+  padding: 8px 12px;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  outline: none;
+}
+.input-field:focus { border-color: #2196f3; }
