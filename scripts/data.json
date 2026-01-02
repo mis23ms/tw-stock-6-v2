@@ -1,60 +1,60 @@
 {
-  "generated_at": "2026-01-01T17:51:21+08:00",
-  "latest_trading_day": "2025-12-31",
-  "prev_trading_day": "2025-12-30",
-  "latest_trading_day_ymd": "20251231",
-  "prev_trading_day_ymd": "20251230",
+  "generated_at": "2026-01-02T16:42:05+08:00",
+  "latest_trading_day": "2026-01-02",
+  "prev_trading_day": "2025-12-31",
+  "latest_trading_day_ymd": "20260102",
+  "prev_trading_day_ymd": "20251231",
   "stocks": {
     "2330": {
       "ticker": "2330",
       "name": "台積電",
-      "close": 1550.0,
-      "change": 30.0,
-      "pct": 1.9736842105263157,
+      "close": 1585.0,
+      "change": 35.0,
+      "pct": 2.258064516129032,
       "foreign": {
-        "buy_shares": 13648721,
-        "sell_shares": 10882660,
-        "net_shares": 2766061,
-        "net_lots": 2766.061
+        "buy_shares": 13930017,
+        "sell_shares": 18328774,
+        "net_shares": -4398757,
+        "net_lots": -4398.757
       }
     },
     "2317": {
       "ticker": "2317",
       "name": "鴻海",
-      "close": 230.5,
-      "change": 2.5,
-      "pct": 1.0964912280701753,
+      "close": 232.0,
+      "change": 1.5,
+      "pct": 0.6507592190889371,
       "foreign": {
-        "buy_shares": 25037164,
-        "sell_shares": 10639688,
-        "net_shares": 14397476,
-        "net_lots": 14397.476
+        "buy_shares": 24990825,
+        "sell_shares": 12425254,
+        "net_shares": 12565571,
+        "net_lots": 12565.571
       }
     },
     "3231": {
       "ticker": "3231",
       "name": "緯創",
-      "close": 150.5,
-      "change": 3.5,
-      "pct": 2.380952380952381,
+      "close": 155.0,
+      "change": 4.5,
+      "pct": 2.990033222591362,
       "foreign": {
-        "buy_shares": 28545149,
-        "sell_shares": 6807581,
-        "net_shares": 21737568,
-        "net_lots": 21737.568
+        "buy_shares": 50242723,
+        "sell_shares": 14874670,
+        "net_shares": 35368053,
+        "net_lots": 35368.053
       }
     },
     "2382": {
       "ticker": "2382",
       "name": "廣達",
-      "close": 272.0,
-      "change": 9.0,
-      "pct": 3.4220532319391634,
+      "close": 277.0,
+      "change": 5.0,
+      "pct": 1.8382352941176472,
       "foreign": {
-        "buy_shares": 10616250,
-        "sell_shares": 9264236,
-        "net_shares": 1352014,
-        "net_lots": 1352.014
+        "buy_shares": 12660432,
+        "sell_shares": 7258313,
+        "net_shares": 5402119,
+        "net_lots": 5402.119
       }
     }
   },
