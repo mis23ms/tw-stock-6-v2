@@ -3,42 +3,49 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>盤後一頁式戰報</title>
+  <title>盤後一頁式戰報 v2</title>
   <link rel="stylesheet" href="./style.css" />
 </head>
 <body>
   <header class="wrap">
-    <h1>盤後一頁式戰報</h1>
-    <p id="meta" class="muted">載入中…</p>
+    <h1>盤後一頁式戰報 <span class="badge">V2 版</span></h1>
+    <div id="meta" class="muted">
+      更新時間：<span id="updatedAt">載入中…</span><br>
+      最新交易日：<span id="latestDay">...</span> ｜ 前一交易日：<span id="prevDay">...</span>
+    </div>
   </header>
 
   <main class="wrap">
-    <!-- ✅ 新增：自選股票（最多 2 支） -->
-    <section>
+    <section class="card">
       <h2>自選股票（最多再加 2 支）</h2>
-      <div id="extra" class="card"></div>
+      <div id="customUI" class="row" style="gap:10px; align-items:flex-end; flex-wrap:wrap;">
+        <div>
+          <small class="muted">加股票 1（4 碼）</small><br/>
+          <input id="custom1" placeholder="例如 2603" class="input-field" />
+        </div>
+        <div>
+          <small class="muted">加股票 2（4 碼）</small><br/>
+          <input id="custom2" placeholder="例如 0050" class="input-field" />
+        </div>
+        <button id="applyCustom" class="tab active">套用</button>
+        <button id="clearCustom" class="tab">清空</button>
+      </div>
     </section>
 
     <section>
-      <h2>四檔個股</h2>
-      <div id="stocks" class="grid"></div>
+      <h2>個股戰報</h2>
+      <div id="stockGrid" class="grid"></div>
     </section>
 
-    <section>
-      <h2>券商分點進出金額排行（ZGB）—指定 6 家</h2>
-      <div id="zgb" class="card"></div>
-    </section>
+    <section id="zgbBox"></section>
 
-    <section>
-      <h2>外資買賣超排行（ZGK_D）</h2>
-      <div id="zgk" class="card"></div>
-    </section>
+    <section id="zgkBox"></section>
   </main>
 
   <footer class="wrap muted">
-    <p>資料來源：TWSE（股價/外資買賣超）與 富邦 MoneyDJ（ZGB / ZGK_D）。</p>
+    <p>資料來源：TWSE、TAIFEX 與 富邦 MoneyDJ。</p>
   </footer>
 
-  <script src="./app.js"></script>
+  <div id="root"></div> <script src="./app.js"></script>
 </body>
 </html>
