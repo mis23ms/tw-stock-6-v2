@@ -386,23 +386,49 @@ function renderZGK(data) {
 }
 
 /* ---------------------------
- * Boot
+ * 穩定強化版 Boot 邏輯
  * --------------------------- */
 async function main() {
   renderCustomInputs();
 
+  // 1. 優先讀取 data.json
   const data = await fetchJson(DATA_URL);
   renderHeader(data);
 
-  // 自選 2 檔：前端抓 TWSE（同樣算 close/change/pct + 外資張）
-  const latestYmd = data.latest_trading_day_ymd;
-  let t86Map = null;
-  try {
-    t86Map = await fetchTwseT86Map(latestYmd);
-  } catch (e) {
-    // 自選也不擋整頁
-    t86Map = null;
+  // 2. 【核心修正】先渲染固定 4 檔，確保畫面第一時間有數據
+  renderStocks(data, []); 
+
+  // 3. 異步處理自選股，不讓它卡死主畫面
+  const c1 = (localStorage.getItem(LS_KEY_1) || "").trim();
+  const c2 = (localStorage.getItem(LS_KEY_2) || "").trim();
+  const customTickers = [c1, c2].filter(x => x);
+
+  if (customTickers.length > 0) {
+    const custom = [];
+    const latestYmd = data.latest_trading_day_ymd;
+    
+    // 建立一個 Map 預抓 T86 數據
+    let t86Map = null;
+    try { t86Map = await fetchTwseT86Map(latestYmd); } catch (e) { t86Map = null; }
+
+    for (const tk of customTickers) {
+      try {
+        const s = await fetchTwseStockDay(latestYmd, tk);
+        const f = t86Map?.get(tk);
+        s.foreign = f ? f : { error: "無外資資料" };
+        custom.push(s);
+      } catch (e) {
+        custom.push({ ticker: tk, name: "載入失敗", close: null, foreign: { error: "抓取失敗" } });
+      }
+    }
+    // 自選股抓完後，更新畫面
+    renderStocks(data, custom);
   }
+
+  // 4. 最後畫排行榜
+  renderZGB(data);
+  renderZGK(data);
+}
 
   const custom = [];
   const c1 = (localStorage.getItem(LS_KEY_1) || "").trim();
